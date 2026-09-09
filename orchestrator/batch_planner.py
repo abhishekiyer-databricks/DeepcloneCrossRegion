@@ -20,11 +20,26 @@ Example with chunk_capacity_gb=50:
   Tables E–K 0.5 GB each → packed into Chunk 1, 3 until full …
 
 Result: large tables drive cluster sizing; small tables batch together.
+
+IMPORTANT — the "many small tables" scale case:
+──────────────────────────────────────────────
+GB-only bin-packing silently defeats parallelism when tables are tiny
+(e.g. 130 tables totalling <1 GB): every table satisfies "remaining >=
+size_gb" for chunk #1 forever, so ALL of them collapse into ONE chunk
+and only ONE cluster ever runs, no matter how high max_concurrent_chunks
+is set. To guarantee real cluster-level parallelism regardless of data
+volume, the planner also enforces `max_tables_per_chunk` — a table-COUNT
+cap per chunk — so a chunk is closed (and a new one opened) once either
+the GB cap OR the table-count cap is hit, whichever comes first. The
+caller (orchestrator_notebook.py) derives this automatically as
+ceil(total_tables / max_concurrent_chunks) so the number of chunks is
+never fewer than max_concurrent_chunks (when there are enough tables to
+go around), independent of how small the tables are.
 """
 
 from __future__ import annotations
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from orchestrator.models import ChunkAssignment, ChunkStatus
 
@@ -38,15 +53,27 @@ class BatchPlanner:
 
     Parameters
     ----------
-    batch_id          : Isolation key for this migration owner.
-    chunk_capacity_gb : Soft upper-bound on total GB per chunk.
-                        A single table larger than this limit gets its
-                        own chunk rather than being split.
+    batch_id            : Isolation key for this migration owner.
+    chunk_capacity_gb   : Soft upper-bound on total GB per chunk.
+                          A single table larger than this limit gets its
+                          own chunk rather than being split.
+    max_tables_per_chunk: Optional hard cap on table COUNT per chunk. Set
+                          this (e.g. ceil(total_tables / max_concurrent_chunks))
+                          to guarantee a minimum number of chunks even when
+                          the tables are too small in aggregate to ever hit
+                          chunk_capacity_gb. None = no count cap (GB-only,
+                          legacy behavior).
     """
 
-    def __init__(self, batch_id: str, chunk_capacity_gb: float = 50.0):
-        self.batch_id          = batch_id
-        self.chunk_capacity_gb = chunk_capacity_gb
+    def __init__(
+        self,
+        batch_id: str,
+        chunk_capacity_gb: float = 50.0,
+        max_tables_per_chunk: Optional[int] = None,
+    ):
+        self.batch_id              = batch_id
+        self.chunk_capacity_gb     = chunk_capacity_gb
+        self.max_tables_per_chunk  = max_tables_per_chunk
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -106,10 +133,16 @@ class BatchPlanner:
     ) -> bool:
         """
         First-fit decreasing: scan existing chunks and place in the first
-        that can still accommodate size_gb.
+        that can still accommodate size_gb AND is still under the
+        max_tables_per_chunk count cap (if set).
         Returns True if placed, False if a new chunk must be opened.
         """
         for chunk in chunks:
+            if (
+                self.max_tables_per_chunk is not None
+                and len(chunk.migration_ids) >= self.max_tables_per_chunk
+            ):
+                continue  # chunk is full by table COUNT — try next chunk
             remaining = self.chunk_capacity_gb - chunk.total_gb
             if remaining >= size_gb or size_gb == 0:
                 chunk.migration_ids.append(migration_id)
@@ -138,6 +171,7 @@ def plan_chunks(
     records:          List[Dict],
     batch_id:         str,
     chunk_capacity_gb: float = 50.0,
+    max_tables_per_chunk: Optional[int] = None,
 ) -> List[ChunkAssignment]:
     """
     Shorthand: build a BatchPlanner and return its plan.
@@ -148,4 +182,4 @@ def plan_chunks(
         for chunk in chunks:
             print(chunk.chunk_id, chunk.size, chunk.total_gb)
     """
-    return BatchPlanner(batch_id, chunk_capacity_gb).plan(records)
+    return BatchPlanner(batch_id, chunk_capacity_gb, max_tables_per_chunk).plan(records)

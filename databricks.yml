@@ -102,7 +102,7 @@ variables:
     default: Standard_D4s_v3    # 4 vCPU / 16 GB — plenty for DDL-only setup
   worker_num_workers:
     description: "Number of Spark worker nodes per chunk cluster"
-    default: "2"                  # → 2 executor nodes + 1 driver = 3 nodes total
+    default: "4"                  # → 4 executor nodes + 1 driver = 5 nodes total (scale test: 8 clusters × 5 = 40 nodes)
 
   # ── Instance pool — used for ALL job_clusters (orchestrator control-plane
   # clusters) so debugging/iterative test runs start in seconds instead of
@@ -119,16 +119,16 @@ variables:
     default: ""                   # blank = auto-generated (date + UUID) at runtime
   max_concurrent_chunks:
     description: "Max cluster jobs (chunks) running simultaneously PER BATCH. Controls cluster spend."
-    default: "3"                  # e.g. 3 × 8-node clusters = 24 nodes live at once per batch
+    default: "8"                  # scale test: 8 × 5-node clusters = 40 nodes live at once per batch
   parallel_threads:
     description: "Clone threads inside each chunk cluster. Each thread = one concurrent DEEP CLONE."
-    default: "4"                  # 4 tables copying simultaneously on the same 8-node cluster
+    default: "4"                  # 4 tables copying simultaneously on each chunk cluster
   chunk_capacity_gb:
-    description: "Soft GB cap per chunk. Tables are bin-packed until this limit. XL tables get own chunk."
+    description: "Soft GB cap per chunk. Tables are bin-packed until this limit OR max_tables_per_chunk (auto-derived as ceil(n_tables/max_concurrent_chunks) in orchestrator_notebook.py) is hit — the count cap guarantees real chunk/cluster parallelism even when the table set is small in total GB (e.g. many tiny tables)."
     default: "500"                 # 500 GB per chunk; tune based on cluster memory
   min_executors:
     description: "Minimum Spark worker nodes enforced per chunk cluster (overrides worker_num_workers if lower)"
-    default: "2"                  # aligned with worker_num_workers = 2
+    default: "4"                  # aligned with worker_num_workers = 4
 
   # ── Table-selection input source (INVENTORY job) ─────────────────────────────
   # Set input_type to CSV, YAML, or JOB here to control the migration source
@@ -144,14 +144,15 @@ variables:
     # configs/migration.yaml is the ONE canonical config file — it supports
     # every input flavour (CSV delegation, or catalog/schema/table mappings)
     # via what's active inside it; see the header comment in that file.
-    # Currently active flavour: CSV delegation → csv_test_ril_bulk_02.csv,
-    # verified end-to-end on 2026-09-08 (onboards all 4 ril_bulk_02 tables:
-    # iot.dim_iot_01/02, marketing.dim_marketing_01/02 → ril_tgt_02.*).
     description: "Full deployed path to the migration YAML config, used when input_type=YAML"
     default: ${workspace.file_path}/configs/migration.yaml
   csv_path:
+    # Scale test (2026-09-09): whole-catalog clone, ril_bulk_02 (130 tables,
+    # 5 schemas) → ril_tgt_02, via a single clone_type=catalog row (Format B).
+    # The earlier 4-table smoke-test CSV is preserved at
+    # configs/archive/csv_test_ril_bulk_02.csv for reference.
     description: "Full deployed path to the CSV table-mapping file, used when input_type=CSV. Leave blank to use YAML instead."
-    default: "${workspace.file_path}/configs/csv_test_ril_bulk_02.csv"
+    default: "${workspace.file_path}/configs/csv_scale_ril_bulk_02_full.csv"
   force_reonboard:
     # INVENTORY is idempotent by default: a table already COMPLETED/VALIDATED/
     # FAILED_PERMANENT/SKIPPED in migration_control is intentionally SKIPPED

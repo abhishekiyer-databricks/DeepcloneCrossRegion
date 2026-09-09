@@ -67,8 +67,9 @@ except Exception:
 # COMMAND ----------
 
 # ── 1. Imports and setup ───────────────────────────────────────────────────────
-import sys, os, uuid, logging, json
+import sys, os, uuid, logging, json, math
 from datetime import datetime, timezone
+from typing import Optional
 
 # ── Path setup: the bundle-deployed root MUST be found FIRST on sys.path ────
 # ROOT CAUSE (found via DEBUG instrumentation): `spark_env_vars.PYTHONPATH`
@@ -138,6 +139,20 @@ from orchestrator.validator     import Validator
 from orchestrator.retry_manager import RetryManager
 from orchestrator.batch_planner import plan_chunks
 from orchestrator.models        import RunSummary
+
+
+def _derive_max_tables_per_chunk(n_records: int, max_concurrent_chunks: int) -> Optional[int]:
+    """
+    Guarantee at least `max_concurrent_chunks` chunks (real parallelism) even
+    when tables are tiny/GB-bin-packing alone would collapse them into one
+    chunk. ceil(n_records / max_concurrent_chunks) tables per chunk means the
+    bin-packer opens a new chunk as soon as a chunk hits that COUNT, on top
+    of (in addition to) the existing GB cap. Returns None if inputs are
+    degenerate (nothing to plan / no concurrency configured).
+    """
+    if n_records <= 0 or max_concurrent_chunks <= 0:
+        return None
+    return math.ceil(n_records / max_concurrent_chunks)
 
 # COMMAND ----------
 
@@ -532,10 +547,17 @@ if MODE in ("INVENTORY", "DRY_RUN"):
         log.info("PHASE 1b — BATCH PLANNING (bin-packing into chunks)")
         all_queued = audit.get_queued_records(limit=50000, batch_id=cfg.batch_id)
         if all_queued:
+            _max_tables_per_chunk = _derive_max_tables_per_chunk(len(all_queued), cfg.max_concurrent_chunks)
+            log.info(
+                "Derived max_tables_per_chunk=%s from %d records / max_concurrent_chunks=%d "
+                "(guarantees >= %d chunks so cluster parallelism isn't defeated by tiny tables)",
+                _max_tables_per_chunk, len(all_queued), cfg.max_concurrent_chunks, cfg.max_concurrent_chunks,
+            )
             chunks = plan_chunks(
-                records           = all_queued,
-                batch_id          = cfg.batch_id,
-                chunk_capacity_gb = cfg.chunk_capacity_gb,
+                records               = all_queued,
+                batch_id              = cfg.batch_id,
+                chunk_capacity_gb     = cfg.chunk_capacity_gb,
+                max_tables_per_chunk  = _max_tables_per_chunk,
             )
             assigned = audit.assign_batch_chunks(cfg.batch_id, chunks)
             log.info(
@@ -586,10 +608,12 @@ elif MODE == "DEEP_CLONE":
         unplanned = [r for r in queued if not r.get("chunk_id")]
         if unplanned:
             log.info("%d records lack chunk assignment — running bin-packing now", len(unplanned))
+            _max_tables_per_chunk = _derive_max_tables_per_chunk(len(queued), cfg.max_concurrent_chunks)
             chunks = plan_chunks(
-                records           = queued,
-                batch_id          = cfg.batch_id,
-                chunk_capacity_gb = cfg.chunk_capacity_gb,
+                records               = queued,
+                batch_id              = cfg.batch_id,
+                chunk_capacity_gb     = cfg.chunk_capacity_gb,
+                max_tables_per_chunk  = _max_tables_per_chunk,
             )
             audit.assign_batch_chunks(cfg.batch_id, chunks)
         else:
