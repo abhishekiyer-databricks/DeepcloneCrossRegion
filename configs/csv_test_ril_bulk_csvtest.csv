@@ -1,0 +1,4 @@
+clone_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,exclude_schemas,exclude_tables
+table,ril_bulk_csvtest,finance,dim_finance_01,ril_tgt_02,finance,dim_finance_01_csvtest,,
+schema,ril_bulk_csvtest,hr,,ril_tgt_02,hr,,,['hr_table1']
+catalog,ril_bulk_csvtest,,,ril_tgt_02,,,['hr'],"['*lineage*','dim_finance_03']"

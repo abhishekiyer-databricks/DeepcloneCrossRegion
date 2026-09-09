@@ -183,65 +183,15 @@ class InputResolver:
         selections: List[TableSelection] = []
 
         # ── New-style: mappings list (mixed catalog / schema / table) ─────────
+        # Expansion logic lives in _expand_mapping_entry() so that _resolve_csv()
+        # can reuse the exact same catalog/schema/table + exclusion behaviour
+        # for its own per-row "clone_type" column (see CSV format 2 below) —
+        # per explicit design goal: "these are already available from YAML
+        # mode, please reuse that."
         for entry in mig.get("mappings", []):
-            mtype       = (entry.get("type") or "schema").lower()
-            ex_schs     = entry.get("exclude_schemas", [])
-            ex_tbls     = entry.get("exclude_tables",  [])
-
-            if mtype == "catalog":
-                src_cat = entry["source"]
-                tgt_cat = entry.get("target", src_cat)
-                if src_cat.lower() in g_excl_cats:
-                    log.info("Skipping catalog %s (globally excluded)", src_cat)
-                    continue
-                raw_sels = self._expand_catalog(src_cat, tgt_cat)
-                for s in raw_sels:
-                    if _sch_excluded(s.source_schema, ex_schs):
-                        log.debug("Excluding %s.%s (schema pattern)", src_cat, s.source_schema)
-                        continue
-                    if _tbl_excluded(s.source_table, ex_tbls):
-                        log.debug("Excluding %s (table pattern)", s.source_table)
-                        continue
-                    selections.append(s)
-
-            elif mtype == "schema":
-                src_cat = entry["source_catalog"]
-                src_sch = entry["source_schema"]
-                tgt_cat = entry.get("target_catalog", src_cat)
-                tgt_sch = entry.get("target_schema",  src_sch)
-                if src_cat.lower() in g_excl_cats:
-                    log.info("Skipping catalog %s (globally excluded)", src_cat)
-                    continue
-                if _sch_excluded(src_sch, ex_schs):
-                    log.info("Skipping schema %s.%s (excluded)", src_cat, src_sch)
-                    continue
-                raw_sels = self._expand_schema(src_cat, src_sch, tgt_cat, tgt_sch)
-                for s in raw_sels:
-                    if _tbl_excluded(s.source_table, ex_tbls):
-                        log.debug("Excluding %s (table pattern)", s.source_table)
-                        continue
-                    selections.append(s)
-
-            elif mtype == "table":
-                src_cat = entry["source_catalog"]
-                src_sch = entry["source_schema"]
-                src_tbl = entry["source_table"]
-                tgt_cat = entry.get("target_catalog", src_cat)
-                tgt_sch = entry.get("target_schema",  src_sch)
-                tgt_tbl = entry.get("target_table",   src_tbl)
-                if src_cat.lower() in g_excl_cats:
-                    continue
-                if _sch_excluded(src_sch, ex_schs):
-                    continue
-                if _tbl_excluded(src_tbl, ex_tbls):
-                    log.debug("Excluding %s (table pattern)", src_tbl)
-                    continue
-                selections.append(TableSelection(
-                    source_catalog=src_cat, source_schema=src_sch, source_table=src_tbl,
-                    target_catalog=tgt_cat, target_schema=tgt_sch, target_table=tgt_tbl,
-                ))
-            else:
-                log.warning("Unknown mapping type '%s' — skipping", mtype)
+            selections.extend(
+                self._expand_mapping_entry(entry, g_excl_cats, _sch_excluded, _tbl_excluded)
+            )
 
         # ── Backward-compat: old-style `selection:` block ─────────────────────
         sel = mig.get("selection", {})
@@ -289,29 +239,234 @@ class InputResolver:
         log.info("YAML resolver produced %d table selections (before dedup)", len(selections))
         return self._deduplicate(selections)
 
+    # ── Shared mapping-entry expansion (used by YAML mappings: AND CSV) ────────
+
+    def _expand_mapping_entry(self, entry: dict, g_excl_cats: set, _sch_excluded, _tbl_excluded) -> List[TableSelection]:
+        """
+        Expand ONE mapping entry (dict) of type catalog/schema/table into
+        TableSelection objects, applying global-catalog + schema/table
+        exclusion patterns. `entry` uses the same key names as a YAML
+        `mappings:` list item:
+          type              catalog | schema | table   (default: schema)
+          source / target                              (catalog-type only)
+          source_catalog / target_catalog               (schema/table-type)
+          source_schema  / target_schema                (schema/table-type)
+          source_table   / target_table                 (table-type only)
+          exclude_schemas   list[str] (glob patterns)    (catalog-type only)
+          exclude_tables    list[str] (glob patterns)    (catalog/schema-type)
+        `_sch_excluded(schema, extra_patterns)` / `_tbl_excluded(table, extra_patterns)`
+        are the closures built by the caller (global + config-level patterns
+        already baked in) — see _resolve_yaml / _resolve_csv.
+        """
+        mtype   = (entry.get("type") or "schema").lower()
+        ex_schs = entry.get("exclude_schemas", [])
+        ex_tbls = entry.get("exclude_tables",  [])
+        out: List[TableSelection] = []
+
+        if mtype == "catalog":
+            src_cat = entry["source"]
+            tgt_cat = entry.get("target", src_cat)
+            if src_cat.lower() in g_excl_cats:
+                log.info("Skipping catalog %s (globally excluded)", src_cat)
+                return out
+            for s in self._expand_catalog(src_cat, tgt_cat):
+                if _sch_excluded(s.source_schema, ex_schs):
+                    log.debug("Excluding %s.%s (schema pattern)", src_cat, s.source_schema)
+                    continue
+                if _tbl_excluded(s.source_table, ex_tbls):
+                    log.debug("Excluding %s (table pattern)", s.source_table)
+                    continue
+                out.append(s)
+
+        elif mtype == "schema":
+            src_cat = entry["source_catalog"]
+            src_sch = entry["source_schema"]
+            tgt_cat = entry.get("target_catalog", src_cat)
+            tgt_sch = entry.get("target_schema",  src_sch)
+            if src_cat.lower() in g_excl_cats:
+                log.info("Skipping catalog %s (globally excluded)", src_cat)
+                return out
+            if _sch_excluded(src_sch, ex_schs):
+                log.info("Skipping schema %s.%s (excluded)", src_cat, src_sch)
+                return out
+            for s in self._expand_schema(src_cat, src_sch, tgt_cat, tgt_sch):
+                if _tbl_excluded(s.source_table, ex_tbls):
+                    log.debug("Excluding %s (table pattern)", s.source_table)
+                    continue
+                out.append(s)
+
+        elif mtype == "table":
+            src_cat = entry["source_catalog"]
+            src_sch = entry["source_schema"]
+            src_tbl = entry["source_table"]
+            tgt_cat = entry.get("target_catalog", src_cat)
+            tgt_sch = entry.get("target_schema",  src_sch)
+            tgt_tbl = entry.get("target_table",   src_tbl)
+            if src_cat.lower() in g_excl_cats:
+                return out
+            if _sch_excluded(src_sch, ex_schs):
+                return out
+            if _tbl_excluded(src_tbl, ex_tbls):
+                log.debug("Excluding %s (table pattern)", src_tbl)
+                return out
+            out.append(TableSelection(
+                source_catalog=src_cat, source_schema=src_sch, source_table=src_tbl,
+                target_catalog=tgt_cat, target_schema=tgt_sch, target_table=tgt_tbl,
+            ))
+        else:
+            log.warning("Unknown mapping type '%s' — skipping", mtype)
+
+        return out
+
     # ── CSV resolver ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_csv_list(raw: str) -> list:
+        """
+        Parse a CSV cell holding a Python-list-literal string, e.g.
+        "['xyz_schema','*information_schema*']", into an actual list.
+        Blank / malformed cells return []. Cells containing a comma MUST be
+        double-quoted in the CSV file itself (standard CSV escaping) so the
+        comma inside the list literal isn't mistaken for a column separator.
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return []
+        try:
+            import ast
+            val = ast.literal_eval(raw)
+            if isinstance(val, (list, tuple)):
+                return [str(x).strip() for x in val]
+            return [str(val).strip()]
+        except Exception:
+            log.warning("Could not parse exclude-list cell %r — treating as empty", raw)
+            return []
 
     def _resolve_csv(self, path: str) -> List[TableSelection]:
         """
-        CSV format (Section 6.3):
-        source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
+        Two supported CSV formats, auto-detected from the header row:
+
+        1. Legacy explicit table-list (no `clone_type` column):
+             source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
+           One row = one explicit table mapping. target_* default to source_*.
+
+        2. Row-level catalog/schema/table selection (header has `clone_type`):
+             clone_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,exclude_schemas,exclude_tables
+           `clone_type` per row is catalog | schema | table (NOT to be
+           confused with the global direct_adls/delta_share clone_type
+           elsewhere in this codebase — this is purely a row SELECTION type,
+           reusing the exact same field name as the sample CSV format
+           supplied by the migration owner):
+             - type=table : source_catalog/source_schema/source_table required.
+                            target_* optional (default = source). exclude_* ignored.
+             - type=schema: source_catalog/source_schema required. source_table
+                            ignored. target_catalog/target_schema optional
+                            (default = source). exclude_tables optional (glob
+                            patterns, Python-list-literal cell,
+                            e.g. "['table1','*lineage*']"). exclude_schemas ignored.
+             - type=catalog: source_catalog required — source_schema/
+                            source_table/target_schema/target_table are
+                            IGNORED (a whole catalog is cloned schema-for-
+                            schema). target_catalog optional (default =
+                            source). exclude_schemas/exclude_tables optional
+                            (glob patterns).
+           catalog/schema rows are expanded via the SAME
+           _expand_mapping_entry() used by YAML `mappings:` — see that
+           method's docstring for exact semantics.
         """
         log.info("Loading CSV selection from %s", path)
-        selections: List[TableSelection] = []
         with open(path, newline="") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            fieldnames = [ (fn or "").strip().lower() for fn in (reader.fieldnames or []) ]
+            rows = list(reader)
+
+        if "clone_type" not in fieldnames:
+            # ── Legacy format: every row is an explicit single-table mapping ──
+            selections: List[TableSelection] = []
+            for row in rows:
                 try:
                     selections.append(TableSelection(
                         source_catalog=row["source_catalog"].strip(),
                         source_schema=row["source_schema"].strip(),
                         source_table=row["source_table"].strip(),
-                        target_catalog=row.get("target_catalog", row["source_catalog"]).strip(),
-                        target_schema=row.get("target_schema", row["source_schema"]).strip(),
-                        target_table=row.get("target_table", row["source_table"]).strip(),
+                        target_catalog=(row.get("target_catalog") or row["source_catalog"]).strip(),
+                        target_schema=(row.get("target_schema") or row["source_schema"]).strip(),
+                        target_table=(row.get("target_table") or row["source_table"]).strip(),
                     ))
                 except KeyError as e:
                     log.warning("CSV row missing required field %s — skipping", e)
+            return self._deduplicate(selections)
+
+        # ── New row-level catalog/schema/table format ─────────────────────────
+        import fnmatch
+
+        # No separate "global" exclusion layer for CSV (unlike YAML's
+        # migration.exclude:/config-level exclude_schemas) — every row is
+        # self-contained. Reuse the exact closure signatures _expand_mapping_
+        # entry() expects so the exclusion behaviour is byte-for-byte
+        # identical to YAML mode.
+        def _sch_excluded(sch: str, extra: list) -> bool:
+            sch_l = sch.lower()
+            return any(fnmatch.fnmatch(sch_l, p.lower()) for p in extra)
+
+        def _tbl_excluded(tbl: str, extra: list) -> bool:
+            tbl_l = tbl.lower()
+            return any(fnmatch.fnmatch(tbl_l, p.lower()) for p in extra)
+
+        selections = []
+        for i, row in enumerate(rows, start=2):  # start=2: header is row 1
+            row = { (k or "").strip().lower(): v for k, v in row.items() }
+            rtype = (row.get("clone_type") or "table").strip().lower()
+            src_cat = (row.get("source_catalog") or "").strip()
+            if not src_cat:
+                log.warning("CSV row %d missing source_catalog — skipping", i)
+                continue
+
+            if rtype == "catalog":
+                entry = {
+                    "type":   "catalog",
+                    "source": src_cat,
+                    "target": (row.get("target_catalog") or src_cat).strip(),
+                    "exclude_schemas": self._parse_csv_list(row.get("exclude_schemas", "")),
+                    "exclude_tables":  self._parse_csv_list(row.get("exclude_tables",  "")),
+                }
+            elif rtype == "schema":
+                src_sch = (row.get("source_schema") or "").strip()
+                if not src_sch:
+                    log.warning("CSV row %d (type=schema) missing source_schema — skipping", i)
+                    continue
+                entry = {
+                    "type":           "schema",
+                    "source_catalog": src_cat,
+                    "source_schema":  src_sch,
+                    "target_catalog": (row.get("target_catalog") or src_cat).strip(),
+                    "target_schema":  (row.get("target_schema") or src_sch).strip(),
+                    "exclude_tables": self._parse_csv_list(row.get("exclude_tables", "")),
+                }
+            elif rtype == "table":
+                src_sch = (row.get("source_schema") or "").strip()
+                src_tbl = (row.get("source_table")  or "").strip()
+                if not src_sch or not src_tbl:
+                    log.warning("CSV row %d (type=table) missing source_schema/source_table — skipping", i)
+                    continue
+                entry = {
+                    "type":           "table",
+                    "source_catalog": src_cat,
+                    "source_schema":  src_sch,
+                    "source_table":   src_tbl,
+                    "target_catalog": (row.get("target_catalog") or src_cat).strip(),
+                    "target_schema":  (row.get("target_schema") or src_sch).strip(),
+                    "target_table":   (row.get("target_table")  or src_tbl).strip(),
+                }
+            else:
+                log.warning("CSV row %d has unknown clone_type=%r — skipping", i, rtype)
+                continue
+
+            selections.extend(
+                self._expand_mapping_entry(entry, set(), _sch_excluded, _tbl_excluded)
+            )
+
+        log.info("CSV resolver produced %d table selections (before dedup)", len(selections))
         return self._deduplicate(selections)
 
     # ── Expansion helpers ─────────────────────────────────────────────────────
