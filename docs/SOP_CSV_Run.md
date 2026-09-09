@@ -1,7 +1,7 @@
 # DeepClone CrossRegion — SOP: Running a CSV-based Migration (`input_type = CSV`, `clone_type = delta_share`)
 
 **Document ID:** SOP-DCR-CSV-01
-**Version:** 1.0
+**Version:** 1.1
 **Owner:** Data Platform Engineering
 **Applies to bundle:** `deepclone_orchestrator` (`databricks.yml`)
 **Classification:** Internal — Data Engineering
@@ -35,7 +35,7 @@
 
 This SOP describes the exact, verified procedure to migrate a **hand-picked list of tables** from a source catalog to a target catalog using:
 
-- **`input_type: CSV`** — the table list comes from a CSV file (`source_catalog,source_schema,source_table,target_catalog,target_schema,target_table`), instead of a YAML config or catalog/schema/table job filters.
+- **`input_type: CSV`** — the table list comes from a CSV file, instead of a YAML config or catalog/schema/table job filters. Two formats are supported (see Step 1): an explicit `source_catalog,source_schema,source_table,target_catalog,target_schema,target_table` list, or a row-level `clone_type` (catalog/schema/table) format with `exclude_schemas`/`exclude_tables` support that reuses YAML mode's expansion logic.
 - **`clone_type: delta_share`** — the DEEP CLONE statement runs `CREATE OR REPLACE TABLE <target_fqn> DEEP CLONE <source_fqn>`, referencing the source table by its UC three-part name (used when the source is reachable directly or via Delta Sharing, as opposed to `direct_adls` which clones from a raw `abfss://` path).
 
 This is the fastest onboarding path for **ad-hoc / curated table lists** (a handful of tables, a cherry-picked back-fill, a one-off DR copy) — no YAML editing, no catalog/schema filter logic, just a flat CSV.
@@ -79,7 +79,11 @@ Everything is scoped by **`batch_id`** — the isolation key. Every table row in
 
 ## Step 1 — Prepare the CSV table-mapping file
 
-Create a CSV under `configs/` with **exactly** this header (target columns are optional — omit them to default to the same name as source):
+Two CSV formats are supported, auto-detected by `InputResolver._resolve_csv()` (`orchestrator/input_resolver.py`) from the presence of a `clone_type` header column. Pick whichever fits your load.
+
+### Format A — Legacy explicit table list (no `clone_type` column)
+
+One row = one explicit table mapping, no wildcards. Target columns are optional — omit them to default to the same name as source.
 
 ```csv
 source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
@@ -89,9 +93,36 @@ ril_bulk_02,marketing,dim_marketing_01,ril_tgt_02,marketing,dim_marketing_01
 ril_bulk_02,marketing,dim_marketing_02,ril_tgt_02,marketing,dim_marketing_02
 ```
 
-Parsed by `InputResolver._resolve_csv()` in `orchestrator/input_resolver.py` — one row per table, no wildcards.
+Use this for a small, hand-picked list of tables (a handful of tables, a cherry-picked back-fill, a one-off DR copy).
 
-> Tip: keep one CSV per logical load (e.g. `csv_<team>_<date>.csv`) so you can tell at a glance what a batch contains.
+### Format B — Row-level catalog/schema/table selection with exclusions (has a `clone_type` column)
+
+Header (column order matters, all 9 columns required — leave cells blank where not applicable):
+
+```csv
+clone_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,exclude_schemas,exclude_tables
+```
+
+Each row's `clone_type` value — `table`, `schema`, or `catalog` — sets that row's **selection granularity** (this is *not* the same `clone_type` as the global `direct_adls`/`delta_share` setting in `databricks.yml`; it just happens to reuse the column name from the source spec). It reuses the *exact same* catalog/schema expansion + exclusion logic already used by YAML `mappings:` entries (`InputResolver._expand_mapping_entry()`), so behaviour is identical between YAML and CSV modes:
+
+| `clone_type` | Required columns | Optional columns | Behaviour |
+|---|---|---|---|
+| `table` | `source_catalog`, `source_schema`, `source_table` | `target_catalog`/`target_schema`/`target_table` (default = source) | One explicit table, same as Format A. `exclude_*` ignored. |
+| `schema` | `source_catalog`, `source_schema` | `target_catalog`/`target_schema` (default = source), `exclude_tables` | Expands **every table** in that schema. `source_table` ignored. `exclude_tables` is a glob-pattern list (see below). `exclude_schemas` ignored. |
+| `catalog` | `source_catalog` | `target_catalog` (default = source), `exclude_schemas`, `exclude_tables` | Expands **every schema and every table** in the catalog. `source_schema`/`source_table`/`target_schema`/`target_table` are ignored — a whole catalog clones schema-for-schema. Both exclusion columns are glob-pattern lists. |
+
+`exclude_schemas` / `exclude_tables` cells hold a **Python-list-literal string**, e.g. `['table1','*lineage*']` (glob patterns, matched case-insensitively). **Because the cell contains a comma, it must be double-quoted in the CSV file** (standard CSV escaping) so the comma inside the list isn't mistaken for a column separator:
+
+```csv
+clone_type,source_catalog,source_schema,source_table,target_catalog,target_schema,target_table,exclude_schemas,exclude_tables
+table,ril_bulk_csvtest,finance,dim_finance_01,ril_tgt_02,finance,dim_finance_01_csvtest,,
+schema,ril_bulk_csvtest,hr,,ril_tgt_02,hr,,,['hr_table1']
+catalog,ril_bulk_csvtest,,,ril_tgt_02,,,['hr'],"['*lineage*','dim_finance_03']"
+```
+
+This example (verified end-to-end, see §18 Change Log v1.1) resolves to exactly 7 tables: `finance.dim_finance_01` (explicit rename via the `table` row), `finance.dim_finance_02` + `finance.fact_finance_txn` (via the `catalog` row — `dim_finance_03` and `finance_lineage_log` excluded by pattern, `hr` schema excluded entirely so it isn't double-counted against the `schema` row below), and `hr.dim_hr_01`/`dim_hr_02`/`dim_hr_03`/`fact_hr_payroll` (via the `schema` row — `hr_table1` excluded). Rows are evaluated in file order and de-duplicated on `source_fqn` — if two rows resolve the same source table, the **first** row's target mapping wins (this is how the explicit `table` row's rename takes priority over the broader `catalog` row above).
+
+> Tip: keep one CSV per logical load (e.g. `csv_<team>_<date>.csv`) so you can tell at a glance what a batch contains. `configs/csv_test_ril_bulk_02.csv` (Format A) and `configs/csv_test_ril_bulk_csvtest.csv` (Format B) in this repo are working, previously-verified examples of each format.
 
 ---
 
@@ -164,7 +195,9 @@ databricks jobs run-now --profile <profile> --json '{
 }'
 ```
 
-> Pick a fresh, descriptive `batch_id` — it's the isolation key. Don't reuse someone else's test batch.
+> Pick a fresh, descriptive `batch_id` — it's the isolation key. Don't reuse someone else's test batch. **You may also omit `batch_id` entirely** (or pass `""`) to have one auto-generated (`batch-<date>-<short-uuid>`) — INVENTORY publishes the value it actually used as a Databricks task value, and `full_migration_workflow`'s downstream tasks (`deep_clone`/`retry`/`validate`) automatically recover the same auto-generated ID (via `dbutils.jobs.taskValues.get(taskKey="inventory", ...)`), so the whole chain stays consistent without you having to read logs to find out what ID was picked. Standalone job-by-job runs (Steps 7/9) still need you to pass the same `batch_id` explicitly, since there's no "inventory" task in the same run to recover it from.
+
+> **Re-testing an already-`VALIDATED`/`COMPLETED` table list?** INVENTORY is idempotent by design — it *skips* re-onboarding any row already `COMPLETED`/`VALIDATED`/`FAILED_PERMANENT`/`SKIPPED`, so re-running the same CSV twice onboards 0 new tables (this is correct behaviour, not a bug). To deliberately force a fresh re-clone of the same table list under a new `batch_id`, add `"force_reonboard": "true"` to `job_parameters`. This also resets any stale `validation_status`/row-count/target-mapping fields left over from the previous pass, so VALIDATE genuinely re-checks the fresh clone instead of skipping it as "already validated".
 
 ![INVENTORY run — Parameters panel (input_type=CSV, csv_path, clone_type=delta_share)](sop_images/05_inventory_csv_parameters_pending.png)
 *Right-hand Parameters panel on the run page confirms the **resolved** values actually used for this run — always double-check `input_type`, `csv_path`, and `clone_type` here before trusting the run.*
@@ -285,10 +318,14 @@ databricks jobs repair-run --profile <profile> --json '{
 
 Without this, the repaired task falls back to the job's blank default `batch_id`, silently auto-generates a random phantom batch, finds 0 `QUEUED` rows for it, and reports a false `SUCCESS` while doing nothing. **When in doubt, trigger a fresh `run-now` instead** — it's idempotent (re-running INVENTORY for the same source/target FQNs reuses the same `migration_id`, just resets status to `QUEUED`).
 
-### G2: "Inventory shows 0 tables" after switching to CSV
-Almost always one of:
-- `csv_path` resolved to a doubled/relative path (e.g. a YAML file's own `csv_path:` field is relative to *that YAML's* directory, not the repo root) — use the full bundle-deployed path.
-- `yaml_config_path` was non-blank and took precedence unexpectedly — check `effective_input_path` in the INVENTORY log line `Input: type=... effective_input_path=...`.
+### G2: "Inventory shows 0 tables" / "Total discovered: 0" after switching to CSV
+Two different root causes, both fixed in the current code but worth knowing about:
+
+- **Genuinely 0 rows resolved** — almost always one of:
+  - `csv_path` resolved to a doubled/relative path (e.g. a YAML file's own `csv_path:` field is relative to *that YAML's* directory, not the repo root) — use the full bundle-deployed path.
+  - `yaml_config_path` was non-blank and took precedence unexpectedly — check `effective_input_path` in the INVENTORY log line `Input: type=... effective_input_path=...`.
+  - (Format B only) a row's `clone_type` cell is misspelled/blank when it shouldn't be, or a required column for that row type is empty — check the notebook log for `CSV row N ... skipping` warnings.
+- **Rows *were* resolved but the summary still shows all zeros** — this happened when every resolved row was already `COMPLETED`/`VALIDATED` from a prior run, so INVENTORY correctly *skipped* re-onboarding them (see the `force_reonboard` note in Step 5) — the underlying summary query used to be scoped to `run_id`, which only ever gets stamped on brand-new rows, so a skip-everything run showed a misleading `Total discovered: 0` even though CSV parsing worked fine. Fixed by rescoping the summary to `batch_id` (which every mode reads/writes consistently) plus overriding INVENTORY's own summary counts directly from its resolver stats. Check the driver log's `Inventory complete: total=N onboarded=N skipped=N failed=N` line — that's always the ground truth regardless of what the printed summary showed on an old build.
 
 ### G3: `clone_type` shows `direct_adls` in the UI even though the CSV/YAML says `delta_share`
 Check the **Parameters panel `(resolved)` value**, not just what you typed in the config — `cfg.clone_type` is only overridden by the job parameter when `input_type != YAML`. For CSV mode, `databricks.yml`'s `clone_type` variable **is** applied, so make sure it's set to `delta_share` there (Step 2). VALIDATE additionally needs `clone_type` wired into its own job parameters (already done in `04_validate_job.yml` / `06_full_migration_workflow.yml`) — for `delta_share`, VALIDATE reads "source" data via the **target** SQL client, since delta-shared tables are visible there.
@@ -303,6 +340,12 @@ Confirm `worker_cluster_json`'s `instance_pool_id` in the relevant job YAML (`03
 databricks api get "/api/2.1/jobs/runs/get?run_id=<chunk_run_id>" --profile <profile> \
   | jq '.tasks[0].new_cluster.instance_pool_id'
 ```
+
+### G6: `full_migration_workflow` with an auto-generated `batch_id` — deep_clone/validate never find any `QUEUED`/`COMPLETED` rows
+Check the driver log for `batch_id widget was blank — recovered <id> via taskValues.get(taskKey='inventory')` — if this line is **absent** and each task instead logs a *different* auto-generated `batch_id` in its own `Published task value batch_id=...` line, the tasks are out of sync. This was an actual bug (the `{{tasks.inventory.values.batch_id}}` dynamic value reference in `06_full_migration_workflow.yml`'s `base_parameters` did not reliably resolve) — fixed by adding a `dbutils.jobs.taskValues.get(taskKey="inventory", key="batch_id")` fallback directly in `orchestrator_notebook.py`. If you see mismatched batch IDs on a fresh checkout, redeploy — this is fixed in the current code.
+
+### G7: (Format B CSV) `ast.literal_eval` warning / exclude pattern silently ignored
+`exclude_schemas`/`exclude_tables` cells are parsed as Python list literals (`InputResolver._parse_csv_list`). If the cell isn't valid Python syntax, or a comma inside the list wasn't double-quoted in the CSV file (so the row got split into the wrong number of columns), you'll see `Could not parse exclude-list cell ... — treating as empty` in the log and the exclusion silently won't apply. Always double-quote any cell containing a comma, e.g. `"['a','b']"`, not `['a','b']` bare.
 
 ---
 
@@ -375,6 +418,7 @@ GROUP BY 1 ORDER BY 1 DESC;
 
 | Version | Date | Author | Change |
 |---|---|---|---|
+| 1.1 | 2026-09-09 | Data Platform Engineering | Added CSV **Format B** (row-level `catalog`/`schema`/`table` selection with `exclude_schemas`/`exclude_tables`, `InputResolver._expand_mapping_entry()`), documented `batch_id` auto-generation + cross-task propagation fix, `force_reonboard` parameter, and the `run_id`→`batch_id` run-summary rescoping fix (G2/G6/G7). Format B verified end-to-end on a new `ril_bulk_csvtest` test catalog (schemas `finance`/`hr`, 10 tables) → `ril_tgt_02`, all 3 row types + both exclusion columns in one file, batch `batch-csvformat-test-01`. |
 | 1.0 | 2026-09-09 | Data Platform Engineering | Initial CSV-run SOP, with screenshots from the verified end-to-end run on `ril_bulk_02` → `ril_tgt_02` (`clone_type=delta_share`) |
 
 ---
