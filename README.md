@@ -1,5 +1,19 @@
 # DeepClone CrossRegion — Data Copy Utility
 
+> ⚠️ **STALE — describes a superseded pre-bundle architecture.** Everything
+> below (`config.json`, `deepclone_main.py`, `auth_manager.py`,
+> `clone_engine.py`, `wrapper_notebook.py`, the onboarding table, etc.)
+> refers to files/tables that no longer exist in this repo. The current
+> implementation is a Databricks Asset Bundle: `databricks.yml` +
+> `resources/*.yml` define the jobs, `orchestrator/*.py` + `notebooks/*.py`
+> hold the logic, and `configs/migration.yaml` is the single config file.
+> For the current, accurate step-by-step procedure, see
+> [`docs/SOP_CSV_Run.md`](docs/SOP_CSV_Run.md). Section 10 (File Reference)
+> below has been corrected to the current tree; everything else in this file
+> is kept only for historical/conceptual context (clone modes, validation
+> options, troubleshooting categories are still conceptually relevant, just
+> described against the old file names).
+
 Production-grade tool for copying Delta Lake tables across Azure Databricks workspaces using **Delta DEEP CLONE**.  
 Supports catalog, schema, or table-level scope, two clone strategies, and configurable post-clone validation.
 
@@ -469,29 +483,34 @@ WHERE status = 'IN_PROGRESS'
 
 ```
 DeepcloneCrossRegion/
-├── README.md                   ← This file
-├── config.json                 ← Global configuration (no secrets)
-├── deepclone_main.py           ← Main job notebook (clone + validate + audit)
-├── deepclone_dashboard.html    ← Architecture & monitoring HTML dashboard
-├── SOP_Onboarding.md           ← Standard Operating Procedure
-├── auth_manager.py             ← OAuth 2.0 token helper
-├── clone_engine.py             ← Discovery, batching, deep clone core
-├── wrapper_notebook.py         ← Databricks notebook wrapper (multi-task jobs)
-├── test_data_generator.py      ← Source mock data creation
-├── test_validator.py           ← Post-clone validation scripts
-├── live_test.py                ← Live connectivity + dry-run test
-├── full_setup_and_test.py      ← End-to-end setup + sample data
-├── setup_metadata_tables.py    ← One-time metadata table DDL
-├── generate_report.py          ← Test report generator
-├── deploy_to_workspace.py      ← Deploys all files to both workspaces
-└── create_and_run_job.py       ← Creates/updates and runs the Databricks Job
+├── README.md                       ← This file (see stale-content banner above)
+├── databricks.yml                  ← Databricks Asset Bundle root config (variables, targets, secrets doc)
+├── configs/
+│   ├── migration.yaml              ← THE canonical config file (CSV delegation or catalog/schema/table mappings)
+│   └── csv_test_ril_bulk_02.csv    ← Example CSV table-mapping file
+├── orchestrator/                   ← Core orchestration logic (importable package)
+│   ├── config.py                   ← OrchestratorConfig, load_from_yaml, validate_config
+│   ├── input_resolver.py           ← Resolves table selection: JOB / YAML / CSV
+│   ├── inventory_manager.py        ← Onboards/upserts rows into migration_control
+│   ├── audit_manager.py            ← State-machine transitions, attempt history, validation history
+│   ├── validator.py                ← Post-clone validation (existence, size, row count)
+│   ├── models.py                   ← Dataclasses (TableSelection, RunSummary, ValidationResult)
+│   └── sql_client.py / api_client.py
+├── notebooks/
+│   ├── orchestrator_notebook.py    ← Main entrypoint (INVENTORY/DRY_RUN/DEEP_CLONE/VALIDATE/RETRY)
+│   ├── chunk_worker_notebook.py    ← Ephemeral per-chunk cluster worker (runs the actual CLONE)
+│   └── setup_control_tables.py     ← One-time DDL for migration_control / migration_attempts / migration_validation_history
+├── resources/                      ← Bundle job definitions (included by databricks.yml)
+│   ├── 00_setup_control_tables.yml
+│   ├── 01_inventory_job.yml
+│   ├── 02_dry_run_job.yml
+│   ├── 03_deep_clone_job.yml
+│   ├── 04_validate_job.yml
+│   ├── 05_retry_job.yml
+│   └── 06_full_migration_workflow.yml   ← End-to-end: inventory → deep_clone → validate
+├── docs/
+│   ├── SOP_CSV_Run.md               ← CURRENT step-by-step SOP (CSV + delta_share)
+│   └── SOP_Onboarding.md            ← Superseded — see banner in that file
+├── scripts/                         ← Ad-hoc/setup helpers (not part of the deployed bundle)
+└── tests/                           ← Ad-hoc test/report scripts (not part of the deployed bundle)
 ```
-
-**Deployed workspace folders:**
-
-- Source: `https://adb-7405609899028573.13.azuredatabricks.net` → `/Users/vivek.ravichandiran@databricks.com/DeepcloneCrossRegion/`
-- Target: `https://adb-7405606418658510.10.azuredatabricks.net` → `/Users/vivek.ravichandiran@databricks.com/DeepcloneCrossRegion/`
-
-**Job:**
-
-- `https://adb-7405609899028573.13.azuredatabricks.net/jobs/346238815508224`

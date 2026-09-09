@@ -98,8 +98,6 @@ NOTEBOOKS = [
     # Test utilities
     "tests/test_data_generator.py",
     "tests/test_validator.py",
-    "tests/live_test.py",
-    "tests/dual_batch_test.py",
 ]
 RAW_FILES = [
     "configs/migration.yaml",
