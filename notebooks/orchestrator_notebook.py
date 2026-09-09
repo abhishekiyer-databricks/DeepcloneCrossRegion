@@ -17,6 +17,7 @@
 # MAGIC | `cluster_pool_config` | JSON array of `{cluster_id, capacity_units}` |
 # MAGIC | `yaml_config_path` | YAML config path (YAML input_type) |
 # MAGIC | `csv_path` | CSV mapping path (CSV input_type) |
+# MAGIC | `exclusion_csv_path` | Global catalog/schema/table exclusion list — applied on top of JOB/YAML/CSV, regardless of input_type. See `orchestrator/exclusion_manager.py`. Excluded tables are skipped at INVENTORY and logged to `migration_exclusion_log`. |
 # MAGIC | `max_retries` | Max retry attempts (default 3) |
 # MAGIC | `validation_enabled` | true/false |
 # MAGIC | `row_count_validation` | true/false (expensive) |
@@ -40,6 +41,11 @@ try:
     dbutils.widgets.text("cluster_pool_config", "[]")
     dbutils.widgets.text("yaml_config_path", "")
     dbutils.widgets.text("csv_path",         "")
+    # exclusion_csv_path: GLOBAL catalog/schema/table exclusion list, applied
+    # on top of whatever input_type resolved (JOB/YAML/CSV) — see
+    # orchestrator/exclusion_manager.py for the CSV format. Blank = no
+    # exclusions (default, zero behavior change).
+    dbutils.widgets.text("exclusion_csv_path", "")
     dbutils.widgets.text("max_retries",      "3")
     dbutils.widgets.dropdown("validation_enabled",   "true",  ["true", "false"])
     dbutils.widgets.dropdown("row_count_validation", "false", ["true", "false"])
@@ -138,6 +144,7 @@ from orchestrator.clone_worker  import CloneWorker
 from orchestrator.validator     import Validator
 from orchestrator.retry_manager import RetryManager
 from orchestrator.batch_planner import plan_chunks
+from orchestrator.exclusion_manager import load_exclusion_rules, apply_exclusions
 from orchestrator.models        import RunSummary
 
 
@@ -178,6 +185,7 @@ _tgt_cat    = _get_widget("target_catalog",      "")
 _cluster_pool = _get_widget("cluster_pool_config","[]")
 _yaml_path  = _get_widget("yaml_config_path",    "")
 _csv_path   = _get_widget("csv_path",            "")
+_exclusion_csv_path = _get_widget("exclusion_csv_path", "")
 
 # ── Auto-detect effective input source ──────────────────────────────────────
 # `input_type` used to be a separate widget that had to be kept manually in
@@ -282,6 +290,10 @@ except ValueError: pass
 # Gate it to JOB mode only so YAML/CSV configs are never shadowed.
 if _input_type == "JOB" and _tgt_cat:
     cfg.default_target_catalog = _tgt_cat
+# Global exclusion list — applies regardless of input_type (see
+# orchestrator/exclusion_manager.py). Independent knob, not tied to
+# JOB/YAML/CSV precedence rules above.
+cfg.exclusion_csv_path = _exclusion_csv_path
 if _cluster_pool and _cluster_pool.strip() not in ("[]", ""):
     import json as _json
     from orchestrator.config import ClusterConfig
@@ -504,6 +516,24 @@ if MODE in ("INVENTORY", "DRY_RUN"):
     log.info("Resolved %d table selections", len(selections))
     log.info("Resolved %d table(s) for migration", len(selections))
 
+    # ── Global exclusion list — applied on top of whatever input_type just
+    # resolved, regardless of whether it was JOB/YAML/CSV. Excluded tables
+    # never reach migration_control; they're recorded in
+    # migration_exclusion_log instead (INVENTORY mode only — see below).
+    _excl_rules = load_exclusion_rules(cfg.exclusion_csv_path)
+    selections, _excluded = apply_exclusions(selections, _excl_rules)
+    if _excl_rules:
+        log.info(
+            "Exclusion list applied (%s): %d table(s) excluded, %d remain",
+            cfg.exclusion_csv_path, len(_excluded), len(selections),
+        )
+        print(f"\n{'─'*68}")
+        print(f"  EXCLUSION LIST — {cfg.exclusion_csv_path}")
+        print(f"  {len(_excluded)} table(s) excluded, {len(selections)} remain")
+        for _sel, _rule in _excluded:
+            print(f"  SKIP  {_sel.source_fqn}  (matched {_rule.describe()})")
+        print(f"{'─'*68}\n")
+
     if MODE == "DRY_RUN":
         print(f"\n{'─'*68}")
         print(f"  DRY RUN — {len(selections)} tables selected (no data will be moved)")
@@ -536,6 +566,10 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             "Inventory complete: total=%d onboarded=%d skipped=%d failed=%d force_reonboard=%s",
             stats["total"], stats["inserted"], stats["skipped"], stats["failed"], _force_reonboard
         )
+        # Audit trail for the global exclusion list (DRY_RUN never writes to
+        # migration_* tables — this only fires for real INVENTORY runs).
+        if _excluded:
+            audit.record_exclusions(cfg.batch_id, _excluded)
         # Ground truth for THIS invocation's own summary — see the
         # "_inventory_stats" override applied to `metrics` further below for why
         # this can't just rely on get_run_metrics()'s run_id-scoped DB query.

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from orchestrator.models import MigrationStatus, AttemptStatus, ChunkAssignment
 from orchestrator.sql_client import SqlClient
@@ -455,6 +455,50 @@ class AuditManager:
               TIMESTAMP '{now}', TIMESTAMP '{now}'
             )
         """)
+
+    # ── Exclusion audit (global exclusion list — Section: exclusion_manager) ──
+
+    def record_exclusions(
+        self,
+        batch_id:  str,
+        excluded:  List[Tuple[object, object]],   # List[Tuple[TableSelection, ExclusionRule]]
+    ) -> int:
+        """
+        Insert one immutable row per excluded table into
+        migration_exclusion_log — this is the audit trail requested for the
+        global exclusion_csv_path feature: every table skipped at INVENTORY
+        time (because it matched a catalog/schema/table exclusion rule) is
+        recorded here, along with WHICH rule matched and its type, so the
+        exclusion is reviewable/auditable rather than silently disappearing.
+
+        `excluded` is the (TableSelection, ExclusionRule) list returned by
+        orchestrator.exclusion_manager.apply_exclusions(). Uses one batched
+        multi-row INSERT (not per-row, unlike assign_batch_chunks) since this
+        is a pure append with no per-row WHERE guard needed.
+
+        Returns the number of rows inserted.
+        """
+        if not excluded:
+            return 0
+        now = _TS()
+        safe_bid = (batch_id or "").replace("'", "\\'")
+        values = []
+        for sel, rule in excluded:
+            values.append(
+                "("
+                f"'{self._run_id}', '{safe_bid}', "
+                f"'{sel.source_catalog}', '{sel.source_schema}', '{sel.source_table}', "
+                f"'{rule.exclude_type}', '{rule.describe().replace(chr(39), chr(92)+chr(39))}', "
+                f"TIMESTAMP '{now}'"
+                ")"
+            )
+        stmt = (
+            f"INSERT INTO {self._cfg.meta_catalog}.{self._cfg.meta_schema}.migration_exclusion_log VALUES "
+            + ", ".join(values)
+        )
+        self._sql.execute_ddl(stmt)
+        log.info("Recorded %d excluded table(s) into migration_exclusion_log (batch=%s)", len(values), batch_id)
+        return len(values)
 
     # ── Aggregate metrics ─────────────────────────────────────────────────────
 

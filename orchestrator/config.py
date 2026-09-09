@@ -65,6 +65,15 @@ class OrchestratorConfig:
     clone_type:            str = "direct_adls"   # delta_share | direct_adls
     default_target_catalog: str = ""             # override target catalog
 
+    # exclusion_csv_path: optional CSV of catalog/schema/table-level exclusion
+    #   rules (see orchestrator/exclusion_manager.py for the format). Applied
+    #   uniformly on top of whatever input_type resolved the selection list
+    #   (JOB/YAML/CSV) — independent of that mechanism's own exclude_schemas/
+    #   exclude_tables (which only apply inside a single YAML mapping/CSV row).
+    #   Every excluded table is skipped at INVENTORY time and recorded into
+    #   migration_exclusion_log for audit/review. Blank = no global exclusions.
+    exclusion_csv_path:     str = ""
+
     # ── Cluster pool ──
     cluster_pool: List[ClusterConfig] = field(default_factory=list)
 

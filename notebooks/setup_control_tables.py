@@ -226,11 +226,40 @@ TBLPROPERTIES (
 )
 """)
 
+# ── migration_exclusion_log ─────────────────────────────────────────────────
+# Audit trail for the global exclusion_csv_path feature (orchestrator/
+# exclusion_manager.py): every table skipped at INVENTORY time because it
+# matched a catalog/schema/table exclusion rule gets one immutable row here
+# — independent of migration_control, since excluded tables never get a
+# migration_control row at all (they're filtered out BEFORE onboarding).
+print("Creating migration_exclusion_log ...")
+sql.execute_ddl(f"""
+CREATE TABLE IF NOT EXISTS `{META_CATALOG}`.`{META_SCHEMA}`.migration_exclusion_log (
+  run_id              STRING        NOT NULL COMMENT 'Orchestrator run_id that performed this INVENTORY pass',
+  batch_id            STRING        COMMENT 'Batch isolation key for the INVENTORY run that excluded this table',
+
+  source_catalog      STRING        NOT NULL,
+  source_schema       STRING        NOT NULL,
+  source_table        STRING        NOT NULL,
+
+  exclusion_type      STRING        COMMENT 'catalog | schema | table — the granularity of the rule that matched',
+  exclusion_rule      STRING        COMMENT 'Human-readable description of the exact rule that matched, e.g. schema:ril_bulk_02.iot',
+
+  excluded_at         TIMESTAMP
+)
+USING DELTA
+COMMENT 'Migration Orchestrator — audit trail of tables skipped by the global exclusion_csv_path list at INVENTORY time'
+TBLPROPERTIES (
+  'delta.autoOptimize.optimizeWrite' = 'true'
+)
+""")
+
 print()
 print("✓ Control tables ready:")
 print(f"  {META_CATALOG}.{META_SCHEMA}.migration_control")
 print(f"  {META_CATALOG}.{META_SCHEMA}.migration_attempts")
 print(f"  {META_CATALOG}.{META_SCHEMA}.migration_validation_history")
+print(f"  {META_CATALOG}.{META_SCHEMA}.migration_exclusion_log")
 
 # ── Sample monitoring queries ──────────────────────────────────────────────────
 print()
@@ -279,6 +308,12 @@ SELECT validated_at, batch_id, source_schema, source_table,
        row_count_checked, row_count_matched, status
 FROM `{META_CATALOG}`.`{META_SCHEMA}`.migration_validation_history
 ORDER BY validated_at DESC;
+
+-- Tables skipped by the global exclusion list (exclusion_csv_path)
+SELECT excluded_at, batch_id, source_catalog, source_schema, source_table,
+       exclusion_type, exclusion_rule
+FROM `{META_CATALOG}`.`{META_SCHEMA}`.migration_exclusion_log
+ORDER BY excluded_at DESC;
 """)
 
 if __name__ == "__main__":

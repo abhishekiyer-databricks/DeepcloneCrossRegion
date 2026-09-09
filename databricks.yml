@@ -153,6 +153,20 @@ variables:
     # configs/archive/csv_test_ril_bulk_02.csv for reference.
     description: "Full deployed path to the CSV table-mapping file, used when input_type=CSV. Leave blank to use YAML instead."
     default: "${workspace.file_path}/configs/csv_scale_ril_bulk_02_full.csv"
+  exclusion_csv_path:
+    # GLOBAL catalog/schema/table exclusion list — applied at INVENTORY time
+    # on top of whichever input_type resolved the selection (JOB/YAML/CSV),
+    # regardless of which one is active. This is independent of the per-row
+    # exclude_schemas/exclude_tables already supported inside a single YAML
+    # mapping entry or CSV Format-B row (input_resolver.py) — this list is
+    # global and cross-cutting instead of scoped to one row. See
+    # orchestrator/exclusion_manager.py for the exact CSV format
+    # (exclude_type=catalog|schema|table + catalog/schema/table columns,
+    # glob patterns allowed). Excluded tables never reach migration_control
+    # — they're recorded into migration_exclusion_log for audit/review
+    # instead. Leave blank for no exclusions (default, zero behavior change).
+    description: "Full deployed path to a CSV of catalog/schema/table exclusion rules, applied at INVENTORY regardless of input_type. Blank = no exclusions."
+    default: "${workspace.file_path}/configs/exclusion_list_example.csv"
   force_reonboard:
     # INVENTORY is idempotent by default: a table already COMPLETED/VALIDATED/
     # FAILED_PERMANENT/SKIPPED in migration_control is intentionally SKIPPED

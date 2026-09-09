@@ -41,6 +41,14 @@ resources:
           default: ${var.yaml_config_path}
         - name: csv_path
           default: ${var.csv_path}
+        # exclusion_csv_path: GLOBAL catalog/schema/table exclusion list,
+        # applied on top of whichever input_type resolved the selection
+        # (JOB/YAML/CSV) — independent of that mechanism's own per-row
+        # exclude_schemas/exclude_tables. See orchestrator/exclusion_manager.py
+        # for the CSV format. Excluded tables are skipped at INVENTORY and
+        # logged to migration_exclusion_log for audit. Blank = no exclusions.
+        - name: exclusion_csv_path
+          default: ${var.exclusion_csv_path}
         # ── Batch parameters — set per migration owner ────────────────────────
         - name: batch_id
           default: ""          # blank = auto-generated (date + short UUID)
@@ -71,6 +79,7 @@ resources:
               input_type: "{{job.parameters.input_type}}"
               yaml_config_path: "{{job.parameters.yaml_config_path}}"
               csv_path: "{{job.parameters.csv_path}}"
+              exclusion_csv_path: "{{job.parameters.exclusion_csv_path}}"
               selection_type: catalog
               source_catalogs: "{{job.parameters.source_catalogs}}"
               source_schemas: "{{job.parameters.source_schemas}}"
