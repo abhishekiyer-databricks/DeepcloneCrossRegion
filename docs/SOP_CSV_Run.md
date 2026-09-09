@@ -1,7 +1,7 @@
 # DeepClone CrossRegion — SOP: Running a CSV-based Migration (`input_type = CSV`, `clone_type = delta_share`)
 
 **Document ID:** SOP-DCR-CSV-01
-**Version:** 1.2
+**Version:** 1.3
 **Owner:** Data Platform Engineering
 **Applies to bundle:** `deepclone_orchestrator` (`databricks.yml`)
 **Classification:** Internal — Data Engineering
@@ -13,7 +13,7 @@
 1. [Purpose & Scope](#1-purpose--scope)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Prerequisites](#3-prerequisites) ([3.1 — confirm source is Delta Shared](#31--mandatory-confirm-the-source-catalogtables-are-already-delta-shared-into-the-target-metastore))
-4. [Step 1 — Prepare the CSV table-mapping file](#step-1--prepare-the-csv-table-mapping-file)
+4. [Step 1 — Prepare the CSV table-mapping file](#step-1--prepare-the-csv-table-mapping-file) ([Optional — global exclusion list](#optional--global-exclusion-list-exclusion_csv_path))
 5. [Step 2 — Point `databricks.yml` at your CSV](#step-2--point-databricksyml-at-your-csv)
 6. [Step 3 — Deploy the bundle](#step-3--deploy-the-bundle)
 7. [Step 4 — One-time setup: create control tables](#step-4--one-time-setup-create-control-tables)
@@ -166,13 +166,41 @@ catalog,ril_bulk_csvtest,,,ril_tgt_02,,,['hr'],"['*lineage*','dim_finance_03']"
 
 This example (verified end-to-end, see §18 Change Log v1.1) resolves to exactly 7 tables: `finance.dim_finance_01` (explicit rename via the `table` row), `finance.dim_finance_02` + `finance.fact_finance_txn` (via the `catalog` row — `dim_finance_03` and `finance_lineage_log` excluded by pattern, `hr` schema excluded entirely so it isn't double-counted against the `schema` row below), and `hr.dim_hr_01`/`dim_hr_02`/`dim_hr_03`/`fact_hr_payroll` (via the `schema` row — `hr_table1` excluded). Rows are evaluated in file order and de-duplicated on `source_fqn` — if two rows resolve the same source table, the **first** row's target mapping wins (this is how the explicit `table` row's rename takes priority over the broader `catalog` row above).
 
-> Tip: keep one CSV per logical load (e.g. `csv_<team>_<date>.csv`) so you can tell at a glance what a batch contains. `configs/csv_test_ril_bulk_02.csv` (Format A) and `configs/csv_test_ril_bulk_csvtest.csv` (Format B) in this repo are working, previously-verified examples of each format.
+> Tip: keep one CSV per logical load (e.g. `csv_<team>_<date>.csv`) so you can tell at a glance what a batch contains. `configs/archive/csv_test_ril_bulk_02.csv` (Format A, archived) and `configs/csv_test_ril_bulk_csvtest.csv` (Format B) in this repo are working, previously-verified examples of each format. `configs/csv_scale_ril_bulk_02_full.csv` is the current default (Format B, single `catalog`-type row cloning the entire `ril_bulk_02` catalog — used for the 8-cluster scale test, see §18 Change Log v1.3).
+
+### Optional — Global exclusion list (`exclusion_csv_path`)
+
+Independent of Format A/B above, and independent of `input_type` (JOB/YAML/CSV) — you can supply a **second, separate CSV** of catalog/schema/table-level exclusion rules that's applied on top of whatever the main CSV/YAML resolves, right before INVENTORY onboards anything. Use this for "never touch these schemas/tables, no matter what the load CSV says" — e.g. permanently excluding a legacy schema, a table under active migration by another team, or a known-problematic table you want to skip without editing the main CSV every time.
+
+This is **not** the same mechanism as Format B's per-row `exclude_schemas`/`exclude_tables` columns — those only scope to the one `catalog`/`schema` row that declares them. The exclusion list here is global and cross-cutting: it's checked against **every** table resolved from **any** input_type, every run.
+
+**CSV format** (`orchestrator/exclusion_manager.py`):
+
+```csv
+exclude_type,catalog,schema,table
+catalog,ril_bulk_old,,
+schema,ril_bulk_02,iot,
+table,ril_bulk_02,finance,dim_finance_01
+```
+
+| Column | Required for | Notes |
+|---|---|---|
+| `exclude_type` | all rows | `catalog` \| `schema` \| `table` — the granularity of this rule |
+| `catalog` | all rows | Required always. Glob pattern allowed (e.g. `ril_bulk_*`) |
+| `schema` | `schema`, `table` rows | Ignored for `catalog` rows. Glob pattern allowed |
+| `table` | `table` rows only | Ignored for `catalog`/`schema` rows. Glob pattern allowed |
+
+Matching is case-insensitive glob (`fnmatch`), same semantics as Format B's `exclude_schemas`/`exclude_tables`. A table is excluded if **any** rule matches it — a `catalog` rule matches every table in that catalog, a `schema` rule matches every table in that catalog.schema, a `table` rule matches exactly one table (or a glob of them).
+
+**What happens to excluded tables:** they are filtered out of the resolved selection list **before** `InventoryManager` ever sees them — they never get a `migration_control` row at all. Instead, every excluded table is recorded as one immutable row in **`migration_exclusion_log`** (`run_id`, `batch_id`, `source_catalog`/`schema`/`table`, `exclusion_type`, `exclusion_rule`, `excluded_at`) — this is the audit trail for "why isn't table X in migration_control", so exclusions are reviewable, not silent. `DRY_RUN` mode previews the exclusion (prints the skip list) but does **not** write to `migration_exclusion_log` — only a real `INVENTORY` run persists the audit record.
+
+Leave `exclusion_csv_path` blank (the widget/job-parameter default) for zero exclusions / zero behavior change.
 
 ---
 
 ## Step 2 — Point `databricks.yml` at your CSV
 
-Edit the `variables:` block near the top of `databricks.yml` — **3 fields**, no other file needs to change:
+Edit the `variables:` block near the top of `databricks.yml` — **3 required fields** (+1 optional), no other file needs to change:
 
 ```yaml
 variables:
@@ -182,6 +210,8 @@ variables:
     default: "delta_share"
   input_type:
     default: "CSV"     # optional / cosmetic — see note below
+  exclusion_csv_path:
+    default: "${workspace.file_path}/configs/<your_exclusion_file>.csv"   # optional — blank = no exclusions
 ```
 
 ![databricks.yml — clone_type: delta_share](sop_images/01_databricks_yml_clone_type_delta_share.png)
@@ -192,6 +222,7 @@ variables:
 - **`csv_path` wins over `yaml_config_path` automatically.** The notebook auto-detects `input_type` from whichever path is non-blank (`csv_path` checked first) — see `orchestrator_notebook.py`'s `_Params.effective_input_path`. You do **not** need to blank out `yaml_config_path`; leave it alone.
 - **`clone_type: delta_share` must be set** for CSV+delta_share runs. If left blank, `OrchestratorConfig` falls back to `direct_adls` for CSV/JOB mode.
 - **Do not set `target_catalog` / `source_catalog_filter` / `source_schema_filter` / `source_table_filter`** to control this run — those are JOB-mode-only variables and are silently ignored once `input_type` resolves to CSV. All source/target info comes from the CSV file itself.
+- **`exclusion_csv_path` is optional and orthogonal to everything above** — set it only if you need the global exclusion list described in Step 1's "Optional" subsection; leave it blank for no exclusions.
 
 ---
 
@@ -205,10 +236,10 @@ Confirm the deployed job parameters actually picked up your values:
 
 ```bash
 databricks jobs get <inventory_job_id> --profile <profile> --output json \
-  | jq -r '.settings.parameters[] | select(.name=="input_type" or .name=="csv_path" or .name=="clone_type")'
+  | jq -r '.settings.parameters[] | select(.name=="input_type" or .name=="csv_path" or .name=="clone_type" or .name=="exclusion_csv_path")'
 ```
 
-Expected: `input_type=CSV`, `csv_path=.../configs/<your_file>.csv`, `clone_type=delta_share`.
+Expected: `input_type=CSV`, `csv_path=.../configs/<your_file>.csv`, `clone_type=delta_share`, `exclusion_csv_path=` either blank (no exclusions) or `.../configs/<your_exclusion_file>.csv`.
 
 ---
 
@@ -243,6 +274,8 @@ databricks jobs run-now --profile <profile> --json '{
 
 > **Re-testing an already-`VALIDATED`/`COMPLETED` table list?** INVENTORY is idempotent by design — it *skips* re-onboarding any row already `COMPLETED`/`VALIDATED`/`FAILED_PERMANENT`/`SKIPPED`, so re-running the same CSV twice onboards 0 new tables (this is correct behaviour, not a bug). To deliberately force a fresh re-clone of the same table list under a new `batch_id`, add `"force_reonboard": "true"` to `job_parameters`. This also resets any stale `validation_status`/row-count/target-mapping fields left over from the previous pass, so VALIDATE genuinely re-checks the fresh clone instead of skipping it as "already validated".
 
+> **If `exclusion_csv_path` is set** (Step 1's "Optional" subsection), the driver log prints an `EXCLUSION LIST` block listing every skipped table and which rule matched, right after `Resolved N table selections`. Excluded tables are recorded to `migration_exclusion_log` (query in Step 6) — they will **not** appear in `migration_control` at all, so don't be alarmed if your CSV's row count doesn't match the number of rows onboarded; check the exclusion log before assuming a bug.
+
 ![INVENTORY run — Parameters panel (input_type=CSV, csv_path, clone_type=delta_share)](sop_images/05_inventory_csv_parameters_pending.png)
 *Right-hand Parameters panel on the run page confirms the **resolved** values actually used for this run — always double-check `input_type`, `csv_path`, and `clone_type` here before trusting the run.*
 
@@ -266,7 +299,19 @@ ORDER BY chunk_id, source_schema, source_table;
 ![migration_control — QUEUED rows for a batch](sop_images/07_migration_control_queued_query.png)
 *All rows should show `status = QUEUED` with a `chunk_id` assigned and no `error_code`. If a row shows a different status or has stale error fields, re-run INVENTORY — the upsert logic resets `started_at`/`error_code`/etc. on re-onboarding.*
 
-**Sign-off before proceeding:** every row you expect from the CSV is present, `status = QUEUED`, `error_code IS NULL`.
+If you set `exclusion_csv_path` in Step 2, also check what got skipped and why:
+
+```sql
+-- Tables skipped by the global exclusion list for this batch
+SELECT source_catalog, source_schema, source_table, exclusion_type, exclusion_rule, excluded_at
+FROM `<meta_catalog>`.`<meta_schema>`.migration_exclusion_log
+WHERE batch_id = '<your-new-batch-id>'
+ORDER BY source_schema, source_table;
+```
+
+`QUEUED count + exclusion_log count` should equal the total number of tables your CSV/YAML would otherwise have resolved — if it doesn't, some rows were neither onboarded nor excluded (check the driver log for `CSV row N ... skipping` / `Source table not found` warnings, e.g. G2).
+
+**Sign-off before proceeding:** every row you expect from the CSV is present, `status = QUEUED`, `error_code IS NULL`, and (if applicable) every intentionally-excluded table shows up in `migration_exclusion_log` with the expected `exclusion_type`/`exclusion_rule`.
 
 ---
 
@@ -330,6 +375,14 @@ ORDER BY source_table;
 
 **Acceptance criteria:** every row `status = VALIDATED`, `row_count_matched = true` (or `NULL` only if you deliberately disabled `row_count_validation`). Any `VALIDATION_FAILED` or count mismatch is a blocker — investigate before signing off.
 
+If you used `exclusion_csv_path`, also re-confirm the exclusion count as part of sign-off — `(migration_control rows) + (migration_exclusion_log rows for this batch)` should equal the total number of tables the CSV/YAML would otherwise have resolved:
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM `<meta_catalog>`.`<meta_schema>`.migration_control WHERE batch_id = '<your-new-batch-id>') AS onboarded,
+  (SELECT COUNT(*) FROM `<meta_catalog>`.`<meta_schema>`.migration_exclusion_log WHERE batch_id = '<your-new-batch-id>') AS excluded;
+```
+
 ---
 
 ## 14. One-shot alternative: `full_migration_workflow`
@@ -391,6 +444,15 @@ Check the driver log for `batch_id widget was blank — recovered <id> via taskV
 
 ### G7: (Format B CSV) `ast.literal_eval` warning / exclude pattern silently ignored
 `exclude_schemas`/`exclude_tables` cells are parsed as Python list literals (`InputResolver._parse_csv_list`). If the cell isn't valid Python syntax, or a comma inside the list wasn't double-quoted in the CSV file (so the row got split into the wrong number of columns), you'll see `Could not parse exclude-list cell ... — treating as empty` in the log and the exclusion silently won't apply. Always double-quote any cell containing a comma, e.g. `"['a','b']"`, not `['a','b']` bare.
+
+### G8: Global `exclusion_csv_path` rule isn't excluding what you expect (or excludes too much)
+This is a **separate mechanism** from Format B's per-row `exclude_schemas`/`exclude_tables` (G7) — don't confuse the two CSV files. Common causes:
+
+- **Wrong `exclude_type` for the intent.** A `schema` row with `catalog=ril_bulk_02,schema=iot` excludes *every table currently and future in that schema* — if you only meant to exclude one table, use a `table` row instead (`orchestrator/exclusion_manager.py`'s `ExclusionRule.matches()` checks `catalog` first, then falls through to `schema`/`table` only for the matching granularity — a `catalog` row with no `schema`/`table` value excludes the **entire catalog**, so a blank `schema`/`table` cell on a `catalog`-type row is correct, not a bug).
+- **Case/glob mismatch.** Matching is `fnmatch`-based and case-insensitive, but glob syntax still applies — `ril_bulk_0*` matches `ril_bulk_02`, but `ril_bulk_02,ril_bulk_03` (comma-separated) does **not** — each catalog/schema/table needs its own row.
+- **Rows skipped at parse time.** Check the driver log right after `Loading global exclusion list from ...` for `Exclusion CSV row N ... — skipping` warnings — a row with an invalid `exclude_type`, or missing a required column for that type (e.g. a `table` row with a blank `table` cell), is dropped silently from the rule set, not applied as a no-op wildcard.
+- **Confirm what rules actually loaded** — the driver log prints one `Exclusion rule: <type>:<catalog>[.<schema>][.<table>]` line per successfully-parsed rule, right after the CSV is loaded. If your intended rule isn't in that list, the CSV row didn't parse.
+- **Blank `exclusion_csv_path` is a no-op**, by design (zero exclusions) — if you expected exclusions to apply but `migration_exclusion_log` has 0 rows for your `batch_id` and `migration_control` has every table, first check the job's resolved `exclusion_csv_path` parameter (Step 3's confirmation command) isn't blank.
 
 ---
 
@@ -455,6 +517,12 @@ SELECT DATE_TRUNC('hour', completed_at) AS hour,
 FROM `<meta_catalog>`.`<meta_schema>`.migration_control
 WHERE status IN ('COMPLETED','VALIDATED')
 GROUP BY 1 ORDER BY 1 DESC;
+
+-- Tables skipped by the global exclusion list (exclusion_csv_path), any batch
+SELECT batch_id, source_catalog, source_schema, source_table,
+       exclusion_type, exclusion_rule, excluded_at
+FROM `<meta_catalog>`.`<meta_schema>`.migration_exclusion_log
+ORDER BY excluded_at DESC;
 ```
 
 ---
@@ -463,6 +531,7 @@ GROUP BY 1 ORDER BY 1 DESC;
 
 | Version | Date | Author | Change |
 |---|---|---|---|
+| 1.3 | 2026-09-09 | Data Platform Engineering | Added the **global exclusion list** feature (`exclusion_csv_path`, `orchestrator/exclusion_manager.py`) — a separate CSV of `catalog`/`schema`/`table` exclusion rules, applied at INVENTORY on top of any `input_type`, independent of Format B's per-row `exclude_schemas`/`exclude_tables`. Excluded tables never reach `migration_control`; they're recorded to the new `migration_exclusion_log` audit table instead. Documented in Step 1 ("Optional — Global exclusion list"), Step 2 (`databricks.yml` wiring), Step 5/6/10 (verification + sign-off queries), §17 (cheat-sheet query), and a new Gotcha G8. Also noted the current scale-test default `csv_path` → `configs/csv_scale_ril_bulk_02_full.csv` (whole-catalog `ril_bulk_02` → `ril_tgt_02`, 130 tables, verified with 8 parallel chunk clusters) in Step 1's tip. Verified end-to-end: INVENTORY with `exclusion_csv_path` set to exclude the whole `iot` schema (26 tables) + `finance.dim_finance_01` (1 table) from the 130-table scale CSV onboarded exactly 103 and logged exactly 27 exclusions, zero leakage into `migration_control`. |
 | 1.2 | 2026-09-09 | Data Platform Engineering | Added §3.1 — mandatory pre-flight check that `source_catalog`/`source_schema`/`source_table` are already Delta Shared and mounted (or same-metastore visible) from the **target** workspace before Step 1, with the source-side (`CREATE SHARE`/`ADD SCHEMA`/`CREATE RECIPIENT`/`GRANT`) and target-side (`CREATE CATALOG ... USING SHARE`) setup commands for a true cross-metastore migration, plus a verification query (`SHOW SCHEMAS`/`SHOW TABLES`/`DESCRIBE DETAIL`). Cross-referenced from G2 as the #1 real-world cause of "0 tables resolved". |
 | 1.1 | 2026-09-09 | Data Platform Engineering | Added CSV **Format B** (row-level `catalog`/`schema`/`table` selection with `exclude_schemas`/`exclude_tables`, `InputResolver._expand_mapping_entry()`), documented `batch_id` auto-generation + cross-task propagation fix, `force_reonboard` parameter, and the `run_id`→`batch_id` run-summary rescoping fix (G2/G6/G7). Format B verified end-to-end on a new `ril_bulk_csvtest` test catalog (schemas `finance`/`hr`, 10 tables) → `ril_tgt_02`, all 3 row types + both exclusion columns in one file, batch `batch-csvformat-test-01`. |
 | 1.0 | 2026-09-09 | Data Platform Engineering | Initial CSV-run SOP, with screenshots from the verified end-to-end run on `ril_bulk_02` → `ril_tgt_02` (`clone_type=delta_share`) |
