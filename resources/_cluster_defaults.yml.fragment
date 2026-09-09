@@ -1,0 +1,12 @@
+# Reference fragment — included in all job cluster definitions
+# Secrets from scope: deepclone-migration
+spark_env_vars:
+  AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
+  AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
+  AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
+  AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
+  AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
+  AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
+  AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
+  AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
+  PYTHONPATH: "/Workspace/Users/vivek.ravichandiran@databricks.com/DeepcloneCrossRegion"

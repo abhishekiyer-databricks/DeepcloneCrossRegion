@@ -1,0 +1,194 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║        Delta Deep Clone Orchestrator — Migration Configuration              ║
+# ║        THE single canonical config file — supports every input flavour.     ║
+# ║                                                                              ║
+# ║  Pass this file to the orchestrator notebook via:                            ║
+# ║    input_type  = YAML                                                        ║
+# ║    yaml_config = <deployed path>/configs/migration.yaml                      ║
+# ║                                                                              ║
+# ║  This ONE file covers all table-selection flavours — switch between them     ║
+# ║  by editing what's active below, nothing else in the repo needs to change:   ║
+# ║    1. csv_path ACTIVE (default below)  → delegates to a CSV table list       ║
+# ║    2. mappings: list (commented out)   → catalog / schema / table mappings,  ║
+# ║                                           mixed freely in one file           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ── Migration Settings ────────────────────────────────────────────────────────
+migration:
+  clone_type: delta_share     # delta_share (FQN clone — same UC metastore or Delta Share)
+                              # direct_adls (abfss:// path clone — cross-storage-account)
+
+  # ── FLAVOUR 1: CSV delegation (ACTIVE) ───────────────────────────────────────
+  # Verified end-to-end on 2026-09-08: onboards all 4 ril_bulk_02 tables
+  # (iot.dim_iot_01/02, marketing.dim_marketing_01/02) → ril_tgt_02.*.
+  # Resolved relative to this YAML file's own directory (configs/), so just
+  # the bare filename — NOT "configs/<name>" again — unless absolute/workspace
+  # path. When csv_path is set (non-blank), the `mappings:`/`selection:`
+  # blocks below are skipped entirely — comment this line out to switch to
+  # FLAVOUR 2 instead.
+  csv_path: csv_test_ril_bulk_02.csv
+
+  # ── FLAVOUR 2: catalog / schema / table mappings (INACTIVE example) ─────────
+  # Only used when csv_path above is blank/commented out. Mix catalog-level,
+  # schema-level, and table-level entries freely in one `mappings:` list —
+  # each entry has a 'type' key: catalog | schema | table. Replace the
+  # placeholder catalog/schema/table names below with real ones before use.
+  #
+  # Exclusion priority (highest → lowest):
+  #   1. Global exclude block (bottom of this section) — always applied
+  #   2. Per-mapping exclude_schemas / exclude_tables — applied to that entry only
+  #   3. Config-level exclude_schemas in execution block
+  #
+  # Glob patterns supported: * (any chars), ? (one char), e.g. "tmp_*", "stg_?"
+  # ──────────────────────────────────────────────────────────────────────────
+  # mappings:
+  #
+  #   # ── CATALOG mapping ─────────────────────────────────────────────────────
+  #   # Clone every schema + table in a catalog. Per-mapping exclusions narrow scope.
+  #   - type: catalog
+  #     source: my_src_catalog          # source catalog name
+  #     target: my_tgt_catalog          # target catalog name (rename allowed)
+  #     exclude_schemas:                # skip these schemas within this catalog
+  #       - information_schema
+  #       - __databricks_internal
+  #     exclude_tables:                 # skip tables matching these glob patterns
+  #       - tmp_*
+  #       - staging_*
+  #
+  #   # ── SCHEMA mapping ──────────────────────────────────────────────────────
+  #   # Clone every table in a specific schema; rename source→target schema.
+  #   - type: schema
+  #     source_catalog: my_src_catalog
+  #     source_schema:  my_src_schema           # source schema
+  #     target_catalog: my_tgt_catalog
+  #     target_schema:  my_tgt_schema           # target schema (rename allowed)
+  #     exclude_tables:
+  #       - _debug_*
+  #       - scratch_*
+  #
+  #   # ── TABLE mapping ───────────────────────────────────────────────────────
+  #   # Explicit single-table mapping. Full rename support.
+  #   - type: table
+  #     source_catalog: my_src_catalog
+  #     source_schema:  my_src_schema
+  #     source_table:   orders_2024
+  #     target_catalog: my_tgt_catalog
+  #     target_schema:  my_tgt_schema
+  #     target_table:   orders_2024_migrated    # optional rename
+  #
+  # exclude:                    # Global exclusions, applied to ALL mappings above.
+  #   catalogs:                 # never touch these catalogs, even if listed above
+  #     - system
+  #     - samples
+  #     - __databricks_internal
+  #   schemas:                  # skip schemas matching these glob patterns (all catalogs)
+  #     - information_schema
+  #     - __databricks_internal
+  #     - tmp_*
+  #   tables:                   # skip tables matching these glob patterns (all schemas)
+  #     - tmp_*
+  #     - staging_*
+  #     - _staging_*
+  #     - __*                   # any table starting with double-underscore
+
+
+# ── Source Workspace ──────────────────────────────────────────────────────────
+# ONLY relevant when migration.clone_type = direct_adls (above). For
+# clone_type = delta_share (the active setting above), the source workspace is
+# NEVER contacted directly — tables are read via the shared catalog that
+# already lives on the TARGET workspace, so none of these fields are consulted
+# and leaving everything blank (as below) is correct — no source SP
+# credentials are needed at all for delta_share. Credentials must NOT be
+# stored here regardless of mode — inject via env vars or Databricks Secrets.
+source:
+  workspace_url: ""            # [direct_adls only] override AZ2AZ_SRC_URL env var
+  client_id: ""                # [direct_adls only] override AZ2AZ_SRC_CID env var
+  warehouse_id: ""             # [direct_adls only] required for DESCRIBE DETAIL
+
+
+# ── Target Workspace ──────────────────────────────────────────────────────────
+# Always required, regardless of clone_type — this is where the control tables
+# (migration_control/migration_attempts) live and where DEEP_CLONE/VALIDATE
+# actually run their SQL, including reading the delta_share catalog for
+# clone_type=delta_share.
+target:
+  workspace_url: ""            # override only if different from AZ2AZ_TGT_URL env var
+  client_id: ""                # override only if different from AZ2AZ_TGT_CID env var
+  warehouse_id: ""             # control-table SQL warehouse (AZ2AZ_TGT_WH_ID)
+  catalog: hive_metastore      # default target catalog (overridden per mapping)
+
+
+# ── Control Tables ────────────────────────────────────────────────────────────
+control_tables:
+  catalog: hive_metastore      # where migration_control & migration_attempts live
+  schema: migration_meta
+
+
+# ── Execution Parameters ──────────────────────────────────────────────────────
+execution:
+  max_retries: 3               # per-table retry limit before FAILED_PERMANENT
+  validation_enabled: true     # run VALIDATE phase after DEEP_CLONE
+  row_count_validation: false  # COUNT(*) comparison — expensive on large tables
+  stale_threshold_minutes: 120 # requeue IN_PROGRESS records stuck beyond this
+  worker_timeout_minutes: 180  # max runtime for each chunk cluster job
+
+  # Schema/table exclusion list (supplement per-mapping excludes and global exclude)
+  exclude_schemas:
+    - information_schema
+    - __databricks_internal
+  exclude_patterns: []         # regex patterns on table name (applied globally)
+  include_only_delta: true     # skip VIEWs, METRIC_VIEWs, non-Delta tables
+
+
+# ── Batch / Chunk Execution Model ─────────────────────────────────────────────
+#
+#  batch_id             → isolation key per team/user. Two people use different
+#                         batch_ids to run full migrations in parallel without
+#                         stepping on each other.
+#
+#  chunk_capacity_gb    → bin-packing target. Tables are sorted large→small and
+#                         packed into chunks until this GB cap is reached.
+#                         An XL table that exceeds the cap gets its own chunk.
+#
+#  max_concurrent_chunks → max live ephemeral cluster jobs PER BATCH at any time.
+#                          Other batches are unaffected.
+#
+#  parallel_threads_per_chunk → DEEP CLONE threads per chunk cluster.
+#                               Each thread = one table copying concurrently.
+#
+#  min_executors_per_chunk → minimum Spark workers per chunk cluster.
+# ─────────────────────────────────────────────────────────────────────────────
+batch:
+  batch_id: ""                    # leave blank to auto-generate (date+UUID)
+  max_concurrent_chunks: 3        # e.g. 3 × 8-node clusters live simultaneously
+  parallel_threads_per_chunk: 4   # 4 tables copying at once on each cluster
+  chunk_capacity_gb: 500          # soft GB cap per chunk; tune to cluster memory
+  min_executors_per_chunk: 8      # hard minimum Spark workers per chunk
+
+
+# ── Workload Classification ───────────────────────────────────────────────────
+# Used by bin-packer to assign tables to chunks intelligently.
+workload:
+  thresholds:          # upper GB boundary for each class (XLARGE = > LARGE)
+    SMALL: 10          # GB
+    MEDIUM: 100
+    LARGE: 1000
+  weights:             # scheduling priority units (higher = own chunk sooner)
+    SMALL: 1
+    MEDIUM: 3
+    LARGE: 8
+    XLARGE: 20
+
+
+# ── Chunk Worker Cluster ──────────────────────────────────────────────────────
+# One ephemeral cluster is created per chunk. Tune node_type_id and num_workers
+# for your Azure region and workload size.
+worker_cluster:
+  spark_version: "15.4.x-scala2.12"
+  node_type_id: Standard_D4s_v3   # change to Standard_E32ds_v5 for large tables
+  num_workers: 2                   # min 8 for production; 2 for dev/test
+  spark_conf:
+    spark.databricks.delta.preview.enabled: "true"
+  azure_attributes:
+    first_on_demand: 1
+    availability: ON_DEMAND_AZURE

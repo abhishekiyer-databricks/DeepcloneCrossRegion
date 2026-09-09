@@ -1,0 +1,108 @@
+resources:
+  jobs:
+    inventory_job:
+      name: "DeepClone 1 - INVENTORY [${bundle.target}]"
+      description: "Discovers and onboards source tables into migration_control (QUEUED status)."
+      tags:
+        team: deepclone
+        phase: inventory
+
+      parameters:
+        - name: source_catalogs
+          default: ${var.source_catalog_filter}
+        - name: source_schemas
+          default: ${var.source_schema_filter}
+        - name: source_tables
+          default: ${var.source_table_filter}
+        - name: target_catalog
+          default: ${var.target_catalog}
+        - name: clone_type
+          default: ${var.clone_type}
+        - name: meta_catalog
+          default: ${var.meta_catalog}
+        - name: meta_schema
+          default: ${var.meta_schema}
+        # ── Input source parameters ────────────────────────────────────────────
+        # All three values are driven from databricks.yml `variables:` (edit
+        # there, not here, to switch modes for every run/target):
+        #   var.input_type        → CSV / YAML / JOB   (display + JOB-mode fallback)
+        #   var.yaml_config_path  → full path, used when input_type=YAML
+        #   var.csv_path          → full path, used when input_type=CSV
+        # The notebook additionally AUTO-DETECTS the effective mode from which
+        # path is non-blank, so input_type can never drift out of sync with
+        # the path actually being used:
+        #   1. csv_path is non-blank           → CSV  (explicit table list, highest priority)
+        #   2. else yaml_config_path non-blank  → YAML (may itself delegate to a CSV via
+        #                                               migration.csv_path inside that file)
+        #   3. else                             → JOB  (source_catalogs/schemas/tables below)
+        - name: input_type
+          default: ${var.input_type}
+        - name: yaml_config_path
+          default: ${var.yaml_config_path}
+        - name: csv_path
+          default: ${var.csv_path}
+        # ── Batch parameters — set per migration owner ────────────────────────
+        - name: batch_id
+          default: ""          # blank = auto-generated (date + short UUID)
+        - name: chunk_capacity_gb
+          default: "50"        # GB soft-limit per chunk / cluster
+        - name: max_concurrent_chunks
+          default: "3"         # max parallel clusters per batch
+        - name: parallel_threads
+          default: "4"         # clone threads within each cluster
+        - name: min_executors
+          default: "2"         # worker nodes per chunk cluster
+
+      tasks:
+        - task_key: inventory
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: INVENTORY
+              input_type: "{{job.parameters.input_type}}"
+              yaml_config_path: "{{job.parameters.yaml_config_path}}"
+              csv_path: "{{job.parameters.csv_path}}"
+              selection_type: catalog
+              source_catalogs: "{{job.parameters.source_catalogs}}"
+              source_schemas: "{{job.parameters.source_schemas}}"
+              source_tables: "{{job.parameters.source_tables}}"
+              target_catalog: "{{job.parameters.target_catalog}}"
+              clone_type: "{{job.parameters.clone_type}}"
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              batch_id: "{{job.parameters.batch_id}}"
+              chunk_capacity_gb: "{{job.parameters.chunk_capacity_gb}}"
+              max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
+              parallel_threads: "{{job.parameters.parallel_threads}}"
+              min_executors: "{{job.parameters.min_executors}}"
+          job_cluster_key: orchestrator_cluster
+
+      job_clusters:
+        - job_cluster_key: orchestrator_cluster
+          new_cluster:
+            spark_version: ${var.worker_spark_version}
+            instance_pool_id: ${var.instance_pool_id}
+            num_workers: 2
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
+            # clone_type=delta_share (this bundle's default) they're unused placeholders
+            # (keys must still exist in the secret scope, values may be blank) — see the
+            # "Secrets" comment block at the top of databricks.yml for the full rationale.
+            spark_env_vars:
+              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
+              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
+              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
+              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
+              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
+              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
+              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
+              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
+              PYTHONPATH: "${workspace.file_path}"
+            cluster_log_conf:
+              dbfs:
+                destination: dbfs:/cluster-logs/deepclone
+
+      email_notifications:
+        on_failure:
+          - vivek.ravichandiran@databricks.com

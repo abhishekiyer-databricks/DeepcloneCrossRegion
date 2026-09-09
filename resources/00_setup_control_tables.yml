@@ -1,0 +1,45 @@
+resources:
+  jobs:
+    setup_control_tables_job:
+      name: "DeepClone 0 - Setup Control Tables [${bundle.target}]"
+      description: "Creates migration_control and migration_attempts Delta tables on the target workspace."
+      tags:
+        team: deepclone
+        phase: setup
+
+      tasks:
+        - task_key: setup_tables
+          notebook_task:
+            notebook_path: ${var.setup_notebook}
+            base_parameters:
+              meta_catalog: ${var.meta_catalog}
+              meta_schema: ${var.meta_schema}
+              repo_root: ${workspace.file_path}
+          job_cluster_key: default_cluster
+
+      job_clusters:
+        - job_cluster_key: default_cluster
+          new_cluster:
+            spark_version: ${var.worker_spark_version}
+            instance_pool_id: ${var.instance_pool_id}
+            num_workers: 2
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
+            # clone_type=delta_share (this bundle's default) they're unused placeholders
+            # (keys must still exist in the secret scope, values may be blank) — see the
+            # "Secrets" comment block at the top of databricks.yml for the full rationale.
+            spark_env_vars:
+              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
+              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
+              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
+              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
+              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
+              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
+              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
+              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
+              PYTHONPATH: "${workspace.file_path}"
+
+      email_notifications:
+        on_failure:
+          - vivek.ravichandiran@databricks.com

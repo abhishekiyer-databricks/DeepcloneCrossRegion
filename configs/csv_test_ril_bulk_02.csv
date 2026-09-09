@@ -1,0 +1,5 @@
+source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
+ril_bulk_02,iot,dim_iot_01,ril_tgt_02,iot,dim_iot_01_csvtest
+ril_bulk_02,iot,dim_iot_02,ril_tgt_02,iot,dim_iot_02_csvtest
+ril_bulk_02,marketing,dim_marketing_01,ril_tgt_02,marketing,dim_marketing_01_csvtest
+ril_bulk_02,marketing,dim_marketing_02,ril_tgt_02,marketing,dim_marketing_02_csvtest

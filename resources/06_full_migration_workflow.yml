@@ -1,0 +1,252 @@
+resources:
+  jobs:
+    full_migration_workflow:
+      name: "DeepClone - Full Migration Workflow [${bundle.target}]"
+      description: |
+        End-to-end migration workflow: INVENTORY → DRY_RUN → DEEP_CLONE → VALIDATE → RETRY (if needed).
+        All tasks are parameterized and modular. DRY_RUN runs in parallel with INVENTORY for planning.
+      tags:
+        team: deepclone
+        phase: full_workflow
+
+      # ── Job-level parameters (passed at run time) ──────────────────────────
+      parameters:
+        # ── Input source parameters (INVENTORY / DRY_RUN only — see the
+        # matching comment block in resources/01_inventory_job.yml for the
+        # full auto-detection rules). DEEP_CLONE/VALIDATE/RETRY below always
+        # use input_type=JOB because those modes operate purely on
+        # migration_control rows filtered by batch_id — they never re-resolve
+        # table selection, so CSV/YAML awareness is irrelevant to them.
+        - name: input_type
+          default: ${var.input_type}
+        - name: yaml_config_path
+          default: ${var.yaml_config_path}
+        - name: csv_path
+          default: ${var.csv_path}
+        - name: source_catalogs
+          default: ${var.source_catalog_filter}
+        - name: source_schemas
+          default: ${var.source_schema_filter}
+        - name: source_tables
+          default: ${var.source_table_filter}
+        - name: target_catalog
+          default: ${var.target_catalog}
+        - name: clone_type
+          default: ${var.clone_type}
+        - name: meta_catalog
+          default: ${var.meta_catalog}
+        - name: meta_schema
+          default: ${var.meta_schema}
+        - name: validation_enabled
+          default: ${var.validation_enabled}
+        - name: row_count_validation
+          default: ${var.row_count_validation}
+        - name: max_retries
+          default: ${var.max_retries}
+        - name: selection_type
+          default: catalog
+        - name: run_id
+          default: ""
+        # ── Batch / Chunk parameters ──────────────────────────────────────────
+        - name: batch_id
+          default: ${var.batch_id}
+        - name: max_concurrent_chunks
+          default: ${var.max_concurrent_chunks}
+        - name: parallel_threads
+          default: ${var.parallel_threads}
+        - name: chunk_capacity_gb
+          default: ${var.chunk_capacity_gb}
+        - name: min_executors
+          default: ${var.min_executors}
+        - name: worker_spark_version
+          default: ${var.worker_spark_version}
+        - name: worker_node_type
+          default: ${var.worker_node_type}
+        - name: worker_notebook_path
+          default: ${var.worker_notebook}   # deployed path to chunk_worker_notebook
+
+      # ── Tasks ──────────────────────────────────────────────────────────────
+      tasks:
+        # Task 1: INVENTORY — discover and onboard tables
+        - task_key: inventory
+          description: "Discover source tables and onboard into migration_control (QUEUED)."
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: INVENTORY
+              input_type: "{{job.parameters.input_type}}"
+              yaml_config_path: "{{job.parameters.yaml_config_path}}"
+              csv_path: "{{job.parameters.csv_path}}"
+              selection_type: "{{job.parameters.selection_type}}"
+              source_catalogs: "{{job.parameters.source_catalogs}}"
+              source_schemas: "{{job.parameters.source_schemas}}"
+              source_tables: "{{job.parameters.source_tables}}"
+              target_catalog: "{{job.parameters.target_catalog}}"
+              clone_type: "{{job.parameters.clone_type}}"
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              run_id: "{{job.parameters.run_id}}"
+              batch_id: "{{job.parameters.batch_id}}"
+              chunk_capacity_gb: "{{job.parameters.chunk_capacity_gb}}"
+              max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
+              parallel_threads: "{{job.parameters.parallel_threads}}"
+              min_executors: "{{job.parameters.min_executors}}"
+          job_cluster_key: orchestrator_cluster
+
+        # Task 2: DRY_RUN — runs in parallel with INVENTORY for pre-flight report
+        - task_key: dry_run
+          description: "Print execution plan without touching data. Runs parallel to INVENTORY."
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: DRY_RUN
+              input_type: "{{job.parameters.input_type}}"
+              yaml_config_path: "{{job.parameters.yaml_config_path}}"
+              csv_path: "{{job.parameters.csv_path}}"
+              selection_type: "{{job.parameters.selection_type}}"
+              source_catalogs: "{{job.parameters.source_catalogs}}"
+              source_schemas: "{{job.parameters.source_schemas}}"
+              source_tables: "{{job.parameters.source_tables}}"
+              target_catalog: "{{job.parameters.target_catalog}}"
+              clone_type: "{{job.parameters.clone_type}}"
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+          job_cluster_key: orchestrator_cluster
+
+        # Task 3: DEEP_CLONE — runs after INVENTORY completes
+        - task_key: deep_clone
+          description: "Execute DEEP CLONE for all QUEUED tables."
+          depends_on:
+            - task_key: inventory
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: DEEP_CLONE
+              input_type: JOB
+              clone_type: "{{job.parameters.clone_type}}"
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              validation_enabled: "{{job.parameters.validation_enabled}}"
+              row_count_validation: "{{job.parameters.row_count_validation}}"
+              max_retries: "{{job.parameters.max_retries}}"
+              run_id: "{{job.parameters.run_id}}"
+              batch_id: "{{job.parameters.batch_id}}"
+              max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
+              parallel_threads: "{{job.parameters.parallel_threads}}"
+              chunk_capacity_gb: "{{job.parameters.chunk_capacity_gb}}"
+              min_executors: "{{job.parameters.min_executors}}"
+              worker_notebook_path: "{{job.parameters.worker_notebook_path}}"
+              worker_cluster_json: >
+                {
+                  "spark_version": "${var.worker_spark_version}",
+                  "instance_pool_id": "${var.instance_pool_id}",
+                  "num_workers": 2,
+                  "spark_conf": {"spark.databricks.delta.preview.enabled": "true"},
+                  "spark_env_vars": {
+                    "AZ2AZ_SRC_URL": "{{secrets/deepclone-migration/src-url}}",
+                    "AZ2AZ_SRC_CID": "{{secrets/deepclone-migration/src-cid}}",
+                    "AZ2AZ_SRC_SECRET": "{{secrets/deepclone-migration/src-secret}}",
+                    "AZ2AZ_TGT_URL": "{{secrets/deepclone-migration/tgt-url}}",
+                    "AZ2AZ_TGT_CID": "{{secrets/deepclone-migration/tgt-cid}}",
+                    "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
+                    "AZ2AZ_TGT_WH_ID": "{{secrets/deepclone-migration/tgt-wh-id}}",
+                    "PYTHONPATH": "/dbfs/deepclone_orchestrator"
+                  }
+                }
+          job_cluster_key: orchestrator_cluster
+
+        # Task 4: RETRY — runs after DEEP_CLONE, handles RETRY_PENDING tables
+        - task_key: retry
+          description: "Re-queue and re-clone any RETRY_PENDING tables."
+          depends_on:
+            - task_key: deep_clone
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: RETRY
+              input_type: JOB
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              max_retries: "{{job.parameters.max_retries}}"
+              run_id: "{{job.parameters.run_id}}"
+              batch_id: "{{job.parameters.batch_id}}"
+              max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
+              parallel_threads: "{{job.parameters.parallel_threads}}"
+              min_executors: "{{job.parameters.min_executors}}"
+              worker_notebook_path: "{{job.parameters.worker_notebook_path}}"
+              worker_cluster_json: >
+                {
+                  "spark_version": "${var.worker_spark_version}",
+                  "instance_pool_id": "${var.instance_pool_id}",
+                  "num_workers": 2,
+                  "spark_env_vars": {
+                    "AZ2AZ_SRC_URL": "{{secrets/deepclone-migration/src-url}}",
+                    "AZ2AZ_TGT_URL": "{{secrets/deepclone-migration/tgt-url}}",
+                    "AZ2AZ_TGT_CID": "{{secrets/deepclone-migration/tgt-cid}}",
+                    "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
+                    "AZ2AZ_TGT_WH_ID": "{{secrets/deepclone-migration/tgt-wh-id}}",
+                    "PYTHONPATH": "/dbfs/deepclone_orchestrator"
+                  }
+                }
+          job_cluster_key: orchestrator_cluster
+
+        # Task 5: VALIDATE — runs after RETRY completes
+        - task_key: validate
+          description: "Validate all COMPLETED clones against source metadata."
+          depends_on:
+            - task_key: retry
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: VALIDATE
+              input_type: JOB
+              clone_type: "{{job.parameters.clone_type}}"
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              validation_enabled: "true"
+              row_count_validation: "{{job.parameters.row_count_validation}}"
+              run_id: "{{job.parameters.run_id}}"
+              batch_id: "{{job.parameters.batch_id}}"
+          job_cluster_key: orchestrator_cluster
+
+      # ── Shared job cluster ─────────────────────────────────────────────────
+      job_clusters:
+        - job_cluster_key: orchestrator_cluster
+          new_cluster:
+            spark_version: ${var.worker_spark_version}
+            instance_pool_id: ${var.instance_pool_id}
+            num_workers: 2
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+              spark.sql.adaptive.enabled: "true"
+            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
+            # clone_type=delta_share (this bundle's default) they're unused placeholders
+            # (keys must still exist in the secret scope, values may be blank) — see the
+            # "Secrets" comment block at the top of databricks.yml for the full rationale.
+            spark_env_vars:
+              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
+              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
+              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
+              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
+              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
+              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
+              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
+              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
+              PYTHONPATH: "${workspace.file_path}"
+            cluster_log_conf:
+              dbfs:
+                destination: dbfs:/cluster-logs/deepclone
+
+      # ── Notifications ──────────────────────────────────────────────────────
+      email_notifications:
+        on_failure:
+          - vivek.ravichandiran@databricks.com
+        on_success:
+          - vivek.ravichandiran@databricks.com
+
+      # ── Health check ──────────────────────────────────────────────────────
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 86400   # alert if workflow takes > 24h

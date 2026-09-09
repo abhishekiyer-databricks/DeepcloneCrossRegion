@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delta Deep Clone Orchestrator — Architecture & Design</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root {
+    --accent: #E87722;
+    --accent2: #1B3A6B;
+    --green: #1E8449;
+    --red: #C0392B;
+    --yellow: #D4AC0D;
+    --purple: #6C3483;
+    --teal: #1A7A6B;
+  }
+  body { font-family: 'Inter', system-ui, sans-serif; background: #0D1117; color: #E5E7EB; }
+  .tab-active { background: var(--accent); color: white; }
+  .tab-inactive { background: #1F2937; color: #9CA3AF; }
+  .tab-inactive:hover { background: #374151; color: #E5E7EB; }
+  .card { background: #161B22; border: 1px solid #30363D; border-radius: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .arrow { display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--accent); }
+  .flow-box { border: 2px solid; border-radius: 10px; padding: 12px 16px; text-align: center; font-weight: 600; font-size: 13px; }
+  .glow { box-shadow: 0 0 20px rgba(232,119,34,0.3); }
+  .cluster-card { background: linear-gradient(135deg, #1a2744 0%, #1a3a2a 100%); border: 1px solid #3B5998; border-radius: 10px; padding: 12px; }
+  .status-pill { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
+  svg text { font-family: 'Inter', system-ui, sans-serif; }
+  .highlight-row { background: rgba(232,119,34,0.1); border-left: 3px solid var(--accent); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes flow { 0%{stroke-dashoffset:100} 100%{stroke-dashoffset:0} }
+  .flowing { stroke-dasharray: 8 4; animation: flow 1s linear infinite; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ── Header ── -->
+<div class="border-b border-gray-800 px-8 py-5" style="background:linear-gradient(90deg,#0D1117 0%,#1a2744 50%,#0D1117 100%)">
+  <div class="max-w-7xl mx-auto flex items-center justify-between">
+    <div>
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center text-xl" style="background:var(--accent)">🔁</div>
+        <div>
+          <h1 class="text-2xl font-bold text-white">Delta Deep Clone Orchestrator</h1>
+          <p class="text-sm text-gray-400">Enterprise Cross-Region Migration Framework · Batch/Chunk Architecture</p>
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-3 text-xs">
+      <span class="badge" style="background:#1E3A5F;color:#60A5FA">v2.0 Batch/Chunk</span>
+      <span class="badge" style="background:#1E3A2F;color:#34D399">Azure Databricks</span>
+      <span class="badge" style="background:#3B1F5E;color:#C084FC">Delta Lake</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Tabs ── -->
+<div class="border-b border-gray-800 px-8" style="background:#0D1117">
+  <div class="max-w-7xl mx-auto flex gap-1 pt-2">
+    <button onclick="showTab('arch')"   id="tab-arch"   class="tab-active px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">🏗 Architecture</button>
+    <button onclick="showTab('config')" id="tab-config" class="tab-inactive px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">⚙️ Config Reference</button>
+    <button onclick="showTab('batch')"  id="tab-batch"  class="tab-inactive px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">🚀 Batch/Chunk Model</button>
+    <button onclick="showTab('state')"  id="tab-state"  class="tab-inactive px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">🔄 State Machine</button>
+    <button onclick="showTab('multi')"  id="tab-multi"  class="tab-inactive px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">👥 Multi-Party</button>
+    <button onclick="showTab('clone')"  id="tab-clone"  class="tab-inactive px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all">🗄 Clone Modes</button>
+  </div>
+</div>
+
+<div class="max-w-7xl mx-auto px-8 py-8">
+
+<!-- ═══════════════════════════════════ TAB: ARCHITECTURE ═══════════════════════════════════ -->
+<div id="pane-arch" class="space-y-6">
+
+  <!-- System Overview -->
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-4 text-white flex items-center gap-2">🏗 System Architecture — End-to-End Flow</h2>
+    <svg viewBox="0 0 1100 520" class="w-full" style="max-height:520px">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#E87722"/>
+        </marker>
+        <marker id="arr2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#60A5FA"/>
+        </marker>
+        <marker id="arr3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#34D399"/>
+        </marker>
+        <linearGradient id="srcGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#1a2744"/>
+          <stop offset="100%" stop-color="#1a3a6b"/>
+        </linearGradient>
+        <linearGradient id="tgtGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#1a3a1a"/>
+          <stop offset="100%" stop-color="#1a5a2a"/>
+        </linearGradient>
+        <linearGradient id="orchGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#3b1f5e"/>
+          <stop offset="100%" stop-color="#5c2d91"/>
+        </linearGradient>
+      </defs>
+
+      <!-- Source Workspace -->
+      <rect x="10" y="30" width="220" height="460" rx="14" fill="url(#srcGrad)" stroke="#3B82F6" stroke-width="2"/>
+      <text x="120" y="56" text-anchor="middle" fill="#60A5FA" font-size="12" font-weight="700">SOURCE WORKSPACE</text>
+      <text x="120" y="72" text-anchor="middle" fill="#93C5FD" font-size="10">adb-xxx.azuredatabricks.net</text>
+      <rect x="25" y="85" width="190" height="50" rx="8" fill="#1E3A5F" stroke="#3B82F6" stroke-width="1"/>
+      <text x="120" y="106" text-anchor="middle" fill="#93C5FD" font-size="11" font-weight="600">Unity Catalog</text>
+      <text x="120" y="122" text-anchor="middle" fill="#60A5FA" font-size="10">source_catalog.schema.table</text>
+      <rect x="25" y="145" width="190" height="50" rx="8" fill="#1E3A5F" stroke="#3B82F6" stroke-width="1"/>
+      <text x="120" y="166" text-anchor="middle" fill="#93C5FD" font-size="11" font-weight="600">SQL Warehouse</text>
+      <text x="120" y="182" text-anchor="middle" fill="#60A5FA" font-size="10">DESCRIBE DETAIL • SHOW TABLES</text>
+      <rect x="25" y="205" width="190" height="50" rx="8" fill="#1E3A5F" stroke="#3B82F6" stroke-width="1"/>
+      <text x="120" y="226" text-anchor="middle" fill="#93C5FD" font-size="11" font-weight="600">ADLS Gen2 Storage</text>
+      <text x="120" y="242" text-anchor="middle" fill="#60A5FA" font-size="10">abfss://container@account.dfs</text>
+      <text x="120" y="290" text-anchor="middle" fill="#6B7280" font-size="10">OAuth 2.0 M2M Token</text>
+      <text x="120" y="307" text-anchor="middle" fill="#6B7280" font-size="10">SP Client ID + Secret</text>
+      <text x="120" y="324" text-anchor="middle" fill="#6B7280" font-size="10">→ Databricks SDK</text>
+
+      <!-- Orchestrator -->
+      <rect x="280" y="10" width="270" height="500" rx="14" fill="url(#orchGrad)" stroke="#A855F7" stroke-width="2"/>
+      <text x="415" y="35" text-anchor="middle" fill="#C084FC" font-size="12" font-weight="700">ORCHESTRATOR</text>
+      <text x="415" y="51" text-anchor="middle" fill="#A78BFA" font-size="10">orchestrator_notebook.py</text>
+      <!-- Phases -->
+      <rect x="295" y="65" width="240" height="52" rx="8" fill="#2D1B69" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="86" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">① INVENTORY</text>
+      <text x="415" y="102" text-anchor="middle" fill="#A78BFA" font-size="9">InputResolver → InventoryManager</text>
+      <text x="415" y="115" text-anchor="middle" fill="#A78BFA" font-size="9">DESCRIBE DETAIL → size_gb, source_path</text>
+
+      <rect x="295" y="127" width="240" height="52" rx="8" fill="#2D1B69" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="148" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">② BATCH PLANNER</text>
+      <text x="415" y="164" text-anchor="middle" fill="#A78BFA" font-size="9">Greedy FFD bin-packing by size_gb</text>
+      <text x="415" y="177" text-anchor="middle" fill="#A78BFA" font-size="9">→ assigns batch_id + chunk_id</text>
+
+      <rect x="295" y="189" width="240" height="52" rx="8" fill="#2D1B69" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="210" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">③ BATCH CHUNK SCHEDULER</text>
+      <text x="415" y="226" text-anchor="middle" fill="#A78BFA" font-size="9">ThreadPoolExecutor(max_concurrent_chunks)</text>
+      <text x="415" y="239" text-anchor="middle" fill="#A78BFA" font-size="9">Sliding window — one job per chunk</text>
+
+      <rect x="295" y="251" width="240" height="52" rx="8" fill="#2D1B69" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="272" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">④ VALIDATE</text>
+      <text x="415" y="288" text-anchor="middle" fill="#A78BFA" font-size="9">File count • size diff • version check</text>
+      <text x="415" y="301" text-anchor="middle" fill="#A78BFA" font-size="9">Optional: row count • checksum</text>
+
+      <rect x="295" y="313" width="240" height="52" rx="8" fill="#2D1B69" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="334" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">⑤ RETRY</text>
+      <text x="415" y="350" text-anchor="middle" fill="#A78BFA" font-size="9">Exponential backoff • attempt guard</text>
+      <text x="415" y="363" text-anchor="middle" fill="#A78BFA" font-size="9">Permanent error classification</text>
+
+      <!-- Control Tables -->
+      <rect x="295" y="376" width="240" height="118" rx="8" fill="#1F0F3D" stroke="#7C3AED" stroke-width="1.5"/>
+      <text x="415" y="397" text-anchor="middle" fill="#DDD6FE" font-size="11" font-weight="700">migration_control (Delta)</text>
+      <text x="415" y="413" text-anchor="middle" fill="#A78BFA" font-size="9">migration_id • batch_id • chunk_id</text>
+      <text x="415" y="427" text-anchor="middle" fill="#A78BFA" font-size="9">status • size_gb • workload_class</text>
+      <text x="415" y="441" text-anchor="middle" fill="#A78BFA" font-size="9">duration_seconds • error_code</text>
+      <text x="415" y="455" text-anchor="middle" fill="#A78BFA" font-size="9">validation_status • validation_message</text>
+      <text x="415" y="469" text-anchor="middle" fill="#6B7280" font-size="9">migration_attempts (history)</text>
+      <text x="415" y="483" text-anchor="middle" fill="#6B7280" font-size="9">Change Data Feed enabled</text>
+
+      <!-- Chunk Clusters -->
+      <rect x="610" y="10" width="240" height="260" rx="14" fill="#0D2818" stroke="#10B981" stroke-width="2"/>
+      <text x="730" y="35" text-anchor="middle" fill="#34D399" font-size="12" font-weight="700">CHUNK WORKER CLUSTERS</text>
+      <text x="730" y="51" text-anchor="middle" fill="#6EE7B7" font-size="10">Ephemeral · Standard_E32ds_v5</text>
+      <rect x="620" y="62" width="220" height="58" rx="8" fill="#0A2010" stroke="#10B981" stroke-width="1.5"/>
+      <text x="730" y="82" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">Chunk 1 — 8 workers</text>
+      <text x="730" y="97" text-anchor="middle" fill="#34D399" font-size="9">Thread 1│Thread 2│Thread 3│Thread 4</text>
+      <text x="730" y="112" text-anchor="middle" fill="#6B7280" font-size="9">CREATE OR REPLACE TABLE ... DEEP CLONE</text>
+      <rect x="620" y="128" width="220" height="58" rx="8" fill="#0A2010" stroke="#10B981" stroke-width="1.5"/>
+      <text x="730" y="148" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">Chunk 2 — 8 workers</text>
+      <text x="730" y="163" text-anchor="middle" fill="#34D399" font-size="9">Thread 1│Thread 2│Thread 3│Thread 4</text>
+      <text x="730" y="178" text-anchor="middle" fill="#6B7280" font-size="9">chunk_worker_notebook.py</text>
+      <rect x="620" y="194" width="220" height="58" rx="8" fill="#1A2010" stroke="#374151" stroke-width="1" stroke-dasharray="5,3"/>
+      <text x="730" y="214" text-anchor="middle" fill="#6B7280" font-size="11" font-weight="600">Chunk 3 — queued</text>
+      <text x="730" y="229" text-anchor="middle" fill="#4B5563" font-size="9">Waiting for slot (max_concurrent_chunks=3)</text>
+      <text x="730" y="244" text-anchor="middle" fill="#4B5563" font-size="9">Starts when Chunk 1 or 2 finishes</text>
+
+      <!-- Target Workspace -->
+      <rect x="870" y="10" width="220" height="460" rx="14" fill="url(#tgtGrad)" stroke="#10B981" stroke-width="2"/>
+      <text x="980" y="35" text-anchor="middle" fill="#34D399" font-size="12" font-weight="700">TARGET WORKSPACE</text>
+      <text x="980" y="51" text-anchor="middle" fill="#6EE7B7" font-size="10">adb-yyy.azuredatabricks.net</text>
+      <rect x="883" y="65" width="194" height="50" rx="8" fill="#0A3018" stroke="#10B981" stroke-width="1"/>
+      <text x="980" y="86" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">Unity Catalog</text>
+      <text x="980" y="102" text-anchor="middle" fill="#34D399" font-size="10">target_catalog.schema.table</text>
+      <rect x="883" y="125" width="194" height="50" rx="8" fill="#0A3018" stroke="#10B981" stroke-width="1"/>
+      <text x="980" y="146" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">SQL Warehouse</text>
+      <text x="980" y="162" text-anchor="middle" fill="#34D399" font-size="10">migration_control read/write</text>
+      <rect x="883" y="185" width="194" height="50" rx="8" fill="#0A3018" stroke="#10B981" stroke-width="1"/>
+      <text x="980" y="206" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">ADLS Gen2 Storage</text>
+      <text x="980" y="222" text-anchor="middle" fill="#34D399" font-size="10">target tables cloned here</text>
+      <rect x="883" y="245" width="194" height="50" rx="8" fill="#0A3018" stroke="#10B981" stroke-width="1"/>
+      <text x="980" y="266" text-anchor="middle" fill="#6EE7B7" font-size="11" font-weight="600">Databricks Secret Scope</text>
+      <text x="980" y="282" text-anchor="middle" fill="#34D399" font-size="10">deepclone-migration</text>
+      <text x="980" y="340" text-anchor="middle" fill="#6B7280" font-size="10">Jobs API (DAB-deployed)</text>
+      <text x="980" y="357" text-anchor="middle" fill="#6B7280" font-size="10">Run Submit API</text>
+      <text x="980" y="374" text-anchor="middle" fill="#6B7280" font-size="10">Clusters API</text>
+
+      <!-- Arrows source → orchestrator -->
+      <line x1="230" y1="110" x2="277" y2="110" stroke="#60A5FA" stroke-width="2" marker-end="url(#arr2)"/>
+      <text x="253" y="105" text-anchor="middle" fill="#60A5FA" font-size="9">OAuth</text>
+      <line x1="230" y1="170" x2="277" y2="170" stroke="#60A5FA" stroke-width="2" marker-end="url(#arr2)"/>
+      <text x="253" y="165" text-anchor="middle" fill="#60A5FA" font-size="9">SQL API</text>
+
+      <!-- Arrows orchestrator → chunk clusters -->
+      <line x1="537" y1="252" x2="607" y2="91" stroke="#E87722" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="572" y="160" text-anchor="middle" fill="#E87722" font-size="9" transform="rotate(-35,572,160)">run-submit</text>
+      <line x1="537" y1="252" x2="607" y2="157" stroke="#E87722" stroke-width="2" marker-end="url(#arr)"/>
+
+      <!-- Arrows chunk → target ADLS (DEEP CLONE) -->
+      <line x1="840" y1="91" x2="870" y2="207" stroke="#34D399" stroke-width="2.5" marker-end="url(#arr3)" stroke-dasharray="6,3"/>
+      <text x="856" y="148" text-anchor="middle" fill="#34D399" font-size="9" transform="rotate(65,856,148)">DEEP CLONE</text>
+      <line x1="840" y1="157" x2="870" y2="207" stroke="#34D399" stroke-width="2.5" marker-end="url(#arr3)" stroke-dasharray="6,3"/>
+
+      <!-- Chunk → update migration_control -->
+      <line x1="730" y1="270" x2="537" y2="413" stroke="#E87722" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+      <text x="640" y="360" text-anchor="middle" fill="#9CA3AF" font-size="9">update status</text>
+    </svg>
+  </div>
+
+  <!-- Key components row -->
+  <div class="grid grid-cols-4 gap-4">
+    <div class="card p-4">
+      <div class="text-sm font-bold text-purple-400 mb-2">🔍 InputResolver</div>
+      <p class="text-xs text-gray-400">Expands catalog/schema/table inputs into flat TableSelection list. Paginates SHOW TABLES via SQL API.</p>
+    </div>
+    <div class="card p-4">
+      <div class="text-sm font-bold text-orange-400 mb-2">📦 BatchPlanner</div>
+      <p class="text-xs text-gray-400">Greedy First-Fit-Decreasing bin-packing. Sorts tables by size DESC, fills chunks to chunk_capacity_gb.</p>
+    </div>
+    <div class="card p-4">
+      <div class="text-sm font-bold text-blue-400 mb-2">⚡ BatchChunkScheduler</div>
+      <p class="text-xs text-gray-400">ThreadPoolExecutor(max_workers=max_concurrent_chunks). One Future per chunk — sliding window concurrency.</p>
+    </div>
+    <div class="card p-4">
+      <div class="text-sm font-bold text-green-400 mb-2">🖥 ChunkWorkerNotebook</div>
+      <p class="text-xs text-gray-400">Runs on 8-executor cluster. ThreadPoolExecutor(parallel_threads) copies tables simultaneously via spark.sql().</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB: CONFIG ═══════════════════════════════════ -->
+<div id="pane-config" class="hidden space-y-6">
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-2 text-white">⚙️ Configuration Reference — Where Each Setting Lives</h2>
+    <p class="text-sm text-gray-400 mb-6">Settings cascade from left (lowest priority) → right (highest priority). Right-hand values override left-hand.</p>
+
+    <!-- Config hierarchy -->
+    <div class="flex items-center gap-2 mb-6 overflow-x-auto pb-2">
+      <div class="text-center flex-shrink-0">
+        <div class="flow-box" style="border-color:#6B7280;color:#9CA3AF;background:#1F2937;min-width:120px">defaults<br/><span style="font-size:10px">OrchestratorConfig</span></div>
+        <div class="text-xs text-gray-500 mt-1">lowest priority</div>
+      </div>
+      <div class="arrow flex-shrink-0">→</div>
+      <div class="text-center flex-shrink-0">
+        <div class="flow-box" style="border-color:#7C3AED;color:#C084FC;background:#1F0F3D;min-width:120px">databricks.yml<br/><span style="font-size:10px">bundle variables</span></div>
+      </div>
+      <div class="arrow flex-shrink-0">→</div>
+      <div class="text-center flex-shrink-0">
+        <div class="flow-box" style="border-color:#D97706;color:#FCD34D;background:#292100;min-width:120px">resources/*.yml<br/><span style="font-size:10px">job parameters</span></div>
+      </div>
+      <div class="arrow flex-shrink-0">→</div>
+      <div class="text-center flex-shrink-0">
+        <div class="flow-box" style="border-color:#059669;color:#34D399;background:#0A2010;min-width:130px">orchestrator_notebook<br/><span style="font-size:10px">widget overrides</span></div>
+      </div>
+      <div class="arrow flex-shrink-0">→</div>
+      <div class="text-center flex-shrink-0">
+        <div class="flow-box" style="border-color:#E87722;color:#FB923C;background:#2D1200;min-width:120px">run-now params<br/><span style="font-size:10px">highest priority</span></div>
+      </div>
+    </div>
+
+    <!-- Settings table -->
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="border-b border-gray-700">
+            <th class="text-left py-2 px-3 text-gray-400 font-semibold">Setting</th>
+            <th class="text-left py-2 px-3 text-gray-400 font-semibold">Purpose</th>
+            <th class="text-left py-2 px-3 text-gray-400 font-semibold">Default</th>
+            <th class="text-left py-2 px-3 text-gray-400 font-semibold">Where Defined</th>
+            <th class="text-left py-2 px-3 text-gray-400 font-semibold">Override At</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800">
+          <!-- Cluster settings -->
+          <tr><td colspan="5" class="py-2 px-3 font-bold text-orange-400 bg-gray-900">🖥 Cluster Compute</td></tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-orange-300">worker_node_type</td>
+            <td class="py-2 px-3 text-gray-300">Azure VM for chunk clusters</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">Standard_E32ds_v5</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml → variables</td>
+            <td class="py-2 px-3 text-gray-400">Job param at run-time</td>
+          </tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-orange-300">worker_num_workers</td>
+            <td class="py-2 px-3 text-gray-300">Spark worker nodes per cluster</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">8</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml → variables</td>
+            <td class="py-2 px-3 text-gray-400">worker_cluster_json param</td>
+          </tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-orange-300">min_executors</td>
+            <td class="py-2 px-3 text-gray-300">Hard floor on executors</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">8</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / config.py</td>
+            <td class="py-2 px-3 text-gray-400">Widget or job param</td>
+          </tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-gray-300">worker_spark_version</td>
+            <td class="py-2 px-3 text-gray-300">Spark version on clusters</td>
+            <td class="py-2 px-3 font-mono text-gray-400">15.4.x-scala2.12</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml → variables</td>
+            <td class="py-2 px-3 text-gray-400">Job param at run-time</td>
+          </tr>
+          <!-- Batch settings -->
+          <tr><td colspan="5" class="py-2 px-3 font-bold text-purple-400 bg-gray-900">🚀 Batch / Chunk</td></tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-purple-300">batch_id</td>
+            <td class="py-2 px-3 text-gray-300">Isolation key per migration owner</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">auto-generated</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / widget</td>
+            <td class="py-2 px-3 text-gray-400">Job param (REQUIRED to match INVENTORY)</td>
+          </tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-purple-300">max_concurrent_chunks</td>
+            <td class="py-2 px-3 text-gray-300">Max live clusters per batch</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">3</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / config.py</td>
+            <td class="py-2 px-3 text-gray-400">Widget or job param</td>
+          </tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-purple-300">parallel_threads</td>
+            <td class="py-2 px-3 text-gray-300">Concurrent clone threads per cluster</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">4</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / config.py</td>
+            <td class="py-2 px-3 text-gray-400">Widget or job param</td>
+          </tr>
+          <tr class="highlight-row">
+            <td class="py-2 px-3 font-mono text-purple-300">chunk_capacity_gb</td>
+            <td class="py-2 px-3 text-gray-300">GB soft cap per chunk</td>
+            <td class="py-2 px-3 font-mono text-yellow-400">50 GB</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / config.py</td>
+            <td class="py-2 px-3 text-gray-400">Widget or job param</td>
+          </tr>
+          <!-- Execution -->
+          <tr><td colspan="5" class="py-2 px-3 font-bold text-blue-400 bg-gray-900">🔧 Execution</td></tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-gray-300">max_retries</td>
+            <td class="py-2 px-3 text-gray-300">Max attempts per table</td>
+            <td class="py-2 px-3 font-mono text-gray-400">3</td>
+            <td class="py-2 px-3 text-gray-400">databricks.yml / config.py</td>
+            <td class="py-2 px-3 text-gray-400">Job param</td>
+          </tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-gray-300">worker_timeout_minutes</td>
+            <td class="py-2 px-3 text-gray-300">Timeout for one chunk job</td>
+            <td class="py-2 px-3 font-mono text-gray-400">180 min</td>
+            <td class="py-2 px-3 text-gray-400">config.py defaults</td>
+            <td class="py-2 px-3 text-gray-400">YAML config file</td>
+          </tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-gray-300">stale_threshold_minutes</td>
+            <td class="py-2 px-3 text-gray-300">Stuck IN_PROGRESS reconcile</td>
+            <td class="py-2 px-3 font-mono text-gray-400">120 min</td>
+            <td class="py-2 px-3 text-gray-400">config.py defaults</td>
+            <td class="py-2 px-3 text-gray-400">YAML config file</td>
+          </tr>
+          <!-- Credentials -->
+          <tr><td colspan="5" class="py-2 px-3 font-bold text-red-400 bg-gray-900">🔐 Credentials (never in files)</td></tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-red-300">AZ2AZ_SRC_*</td>
+            <td class="py-2 px-3 text-gray-300">Source workspace SP credentials</td>
+            <td class="py-2 px-3 font-mono text-gray-400">—</td>
+            <td class="py-2 px-3 text-gray-400">Databricks Secret Scope</td>
+            <td class="py-2 px-3 text-gray-400">spark_env_vars injection</td>
+          </tr>
+          <tr>
+            <td class="py-2 px-3 font-mono text-red-300">AZ2AZ_TGT_*</td>
+            <td class="py-2 px-3 text-gray-300">Target workspace SP credentials</td>
+            <td class="py-2 px-3 font-mono text-gray-400">—</td>
+            <td class="py-2 px-3 text-gray-400">Databricks Secret Scope</td>
+            <td class="py-2 px-3 text-gray-400">spark_env_vars injection</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB: BATCH/CHUNK ═══════════════════════════════════ -->
+<div id="pane-batch" class="hidden space-y-6">
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-4 text-white">🚀 Batch/Chunk Execution Model</h2>
+    <div class="grid grid-cols-2 gap-8">
+      <!-- Bin-packing illustration -->
+      <div>
+        <h3 class="text-sm font-bold text-orange-400 mb-3">Step 1: Inventory → Bin-Packing (BatchPlanner)</h3>
+        <div class="space-y-2">
+          <div class="text-xs text-gray-400 mb-2">Tables sorted by size DESC, packed into 50 GB chunks:</div>
+          <!-- Chunk 1 -->
+          <div class="rounded-lg border border-green-700 overflow-hidden">
+            <div class="px-3 py-1.5 text-xs font-bold text-green-300" style="background:#0A2010">Chunk 1 — Dedicated (XL table, 120 GB)</div>
+            <div class="px-3 py-2 flex items-center gap-2">
+              <div class="flex-1 rounded text-xs text-center py-1 font-semibold text-red-300" style="background:#3D0A0A;border:1px solid #C0392B">Table A — 120 GB (XLARGE)</div>
+            </div>
+            <div class="px-3 pb-2 text-xs text-gray-500">→ Gets its own cluster (exceeds chunk_capacity_gb)</div>
+          </div>
+          <!-- Chunk 2 -->
+          <div class="rounded-lg border border-green-700 overflow-hidden">
+            <div class="px-3 py-1.5 text-xs font-bold text-green-300" style="background:#0A2010">Chunk 2 — 48.5 GB / 50 GB</div>
+            <div class="px-3 py-2 flex items-center gap-2 flex-wrap">
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-yellow-300" style="background:#292100;border:1px solid #D97706">Table B 30 GB</div>
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-yellow-300" style="background:#292100;border:1px solid #D97706">Table C 12 GB</div>
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-blue-300" style="background:#0A1A3A;border:1px solid #3B82F6">Table D 6.5 GB</div>
+            </div>
+          </div>
+          <!-- Chunk 3 -->
+          <div class="rounded-lg border border-green-700 overflow-hidden">
+            <div class="px-3 py-1.5 text-xs font-bold text-green-300" style="background:#0A2010">Chunk 3 — 43 GB / 50 GB (12 tables)</div>
+            <div class="px-3 py-2 flex items-center gap-2 flex-wrap">
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-blue-300" style="background:#0A1A3A;border:1px solid #3B82F6">T1 3.5GB</div>
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-blue-300" style="background:#0A1A3A;border:1px solid #3B82F6">T2 3.2GB</div>
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-blue-300" style="background:#0A1A3A;border:1px solid #3B82F6">T3 3.0GB</div>
+              <div class="rounded text-xs text-center px-2 py-1 font-semibold text-gray-300" style="background:#1F2937;border:1px solid #374151">+9 more</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Concurrent execution -->
+      <div>
+        <h3 class="text-sm font-bold text-blue-400 mb-3">Step 2: Concurrent Execution (BatchChunkScheduler)</h3>
+        <div class="text-xs text-gray-400 mb-3">max_concurrent_chunks=3 → 3 live clusters at most per batch</div>
+        <div class="space-y-2">
+          <div class="flex items-center gap-2 text-xs">
+            <div class="w-16 text-gray-500 font-mono">t=0</div>
+            <div class="flex gap-1 flex-1">
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 1 ▶ RUNNING</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 2 ▶ RUNNING</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 3 ▶ RUNNING</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <div class="w-16 text-gray-500 font-mono">t=25min</div>
+            <div class="flex gap-1 flex-1">
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-gray-400" style="background:#1F2937;border:1px solid #374151">Chunk 1 ✓ DONE</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 2 ▶ RUNNING</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 3 ▶ RUNNING</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 text-xs">
+            <div class="w-16 text-gray-500 font-mono">→ slot freed</div>
+            <div class="flex gap-1 flex-1">
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 4 ▶ STARTS</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 2 ▶ RUNNING</div>
+              <div class="flex-1 rounded px-2 py-2 text-center font-semibold text-green-300 pulse" style="background:#0A2010;border:1px solid #10B981">Chunk 3 ▶ RUNNING</div>
+            </div>
+          </div>
+          <div class="mt-3 p-3 rounded-lg" style="background:#1F2937;border:1px solid #374151">
+            <div class="text-xs font-bold text-gray-300 mb-2">Inside each chunk cluster:</div>
+            <div class="flex gap-1">
+              <div class="flex-1 rounded px-2 py-1.5 text-center text-xs font-semibold text-purple-300" style="background:#1F0F3D;border:1px solid #7C3AED">Thread 1<br/>Table X</div>
+              <div class="flex-1 rounded px-2 py-1.5 text-center text-xs font-semibold text-purple-300" style="background:#1F0F3D;border:1px solid #7C3AED">Thread 2<br/>Table Y</div>
+              <div class="flex-1 rounded px-2 py-1.5 text-center text-xs font-semibold text-purple-300" style="background:#1F0F3D;border:1px solid #7C3AED">Thread 3<br/>Table Z</div>
+              <div class="flex-1 rounded px-2 py-1.5 text-center text-xs font-semibold text-purple-300" style="background:#1F0F3D;border:1px solid #7C3AED">Thread 4<br/>Table W</div>
+            </div>
+            <div class="text-xs text-gray-500 mt-2 text-center">parallel_threads=4 → 4 DEEP CLONE statements run simultaneously</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB: STATE MACHINE ═══════════════════════════════════ -->
+<div id="pane-state" class="hidden">
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-4 text-white">🔄 migration_control State Machine</h2>
+    <svg viewBox="0 0 1050 400" class="w-full" style="max-height:400px">
+      <defs>
+        <marker id="sarr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#9CA3AF"/>
+        </marker>
+        <marker id="garr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#10B981"/>
+        </marker>
+        <marker id="rarr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#EF4444"/>
+        </marker>
+        <marker id="yarr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#F59E0B"/>
+        </marker>
+      </defs>
+
+      <!-- States -->
+      <g>
+        <rect x="10" y="170" width="110" height="36" rx="8" fill="#1F2937" stroke="#6B7280" stroke-width="1.5"/>
+        <text x="65" y="193" text-anchor="middle" fill="#9CA3AF" font-size="11" font-weight="600">DISCOVERED</text>
+      </g>
+      <g>
+        <rect x="145" y="170" width="100" height="36" rx="8" fill="#1F2937" stroke="#6B7280" stroke-width="1.5"/>
+        <text x="195" y="193" text-anchor="middle" fill="#9CA3AF" font-size="11" font-weight="600">ONBOARDED</text>
+      </g>
+      <g>
+        <rect x="270" y="170" width="140" height="36" rx="8" fill="#292100" stroke="#D97706" stroke-width="1.5"/>
+        <text x="340" y="193" text-anchor="middle" fill="#FCD34D" font-size="11" font-weight="600">WAITING_FOR_LOAD</text>
+      </g>
+      <g>
+        <rect x="435" y="170" width="90" height="36" rx="8" fill="#0A1A3A" stroke="#3B82F6" stroke-width="1.5"/>
+        <text x="480" y="193" text-anchor="middle" fill="#93C5FD" font-size="11" font-weight="600">QUEUED</text>
+      </g>
+      <!-- batch_id + chunk_id assigned here -->
+      <text x="480" y="162" text-anchor="middle" fill="#E87722" font-size="9">batch_id + chunk_id assigned</text>
+      <g>
+        <rect x="550" y="170" width="90" height="36" rx="8" fill="#0A1A3A" stroke="#60A5FA" stroke-width="1.5"/>
+        <text x="595" y="193" text-anchor="middle" fill="#93C5FD" font-size="11" font-weight="600">ASSIGNED</text>
+      </g>
+      <g>
+        <rect x="665" y="170" width="110" height="36" rx="8" fill="#1F0F3D" stroke="#A855F7" stroke-width="1.5"/>
+        <text x="720" y="193" text-anchor="middle" fill="#C084FC" font-size="11" font-weight="600">IN_PROGRESS</text>
+      </g>
+      <!-- Success path -->
+      <g>
+        <rect x="800" y="100" width="100" height="36" rx="8" fill="#0A2010" stroke="#10B981" stroke-width="2"/>
+        <text x="850" y="123" text-anchor="middle" fill="#34D399" font-size="11" font-weight="700">COMPLETED</text>
+      </g>
+      <g>
+        <rect x="920" y="60" width="120" height="36" rx="8" fill="#052010" stroke="#10B981" stroke-width="2.5"/>
+        <text x="980" y="83" text-anchor="middle" fill="#34D399" font-size="12" font-weight="700">✓ VALIDATED</text>
+      </g>
+      <g>
+        <rect x="920" y="130" width="120" height="36" rx="8" fill="#3D1A00" stroke="#D97706" stroke-width="2"/>
+        <text x="980" y="153" text-anchor="middle" fill="#FCD34D" font-size="11" font-weight="600">VAL_FAILED</text>
+      </g>
+      <!-- Failure path -->
+      <g>
+        <rect x="800" y="240" width="100" height="36" rx="8" fill="#3D0A0A" stroke="#EF4444" stroke-width="1.5"/>
+        <text x="850" y="263" text-anchor="middle" fill="#FCA5A5" font-size="11" font-weight="600">FAILED</text>
+      </g>
+      <g>
+        <rect x="920" y="310" width="120" height="36" rx="8" fill="#2D0A0A" stroke="#DC2626" stroke-width="2.5"/>
+        <text x="980" y="333" text-anchor="middle" fill="#F87171" font-size="11" font-weight="700">FAILED_PERMANENT</text>
+      </g>
+      <g>
+        <rect x="670" y="310" width="120" height="36" rx="8" fill="#3D1A00" stroke="#D97706" stroke-width="1.5"/>
+        <text x="730" y="333" text-anchor="middle" fill="#FCD34D" font-size="11" font-weight="600">RETRY_PENDING</text>
+      </g>
+      <g>
+        <rect x="10" y="310" width="90" height="36" rx="8" fill="#1F2937" stroke="#6B7280" stroke-width="1.5"/>
+        <text x="55" y="333" text-anchor="middle" fill="#9CA3AF" font-size="11" font-weight="600">SKIPPED</text>
+      </g>
+
+      <!-- Transition arrows -->
+      <line x1="120" y1="188" x2="142" y2="188" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#sarr)"/>
+      <line x1="245" y1="188" x2="267" y2="188" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#sarr)"/>
+      <line x1="410" y1="188" x2="432" y2="188" stroke="#60A5FA" stroke-width="1.5" marker-end="url(#sarr)"/>
+      <line x1="525" y1="188" x2="547" y2="188" stroke="#60A5FA" stroke-width="1.5" marker-end="url(#sarr)"/>
+      <line x1="640" y1="188" x2="662" y2="188" stroke="#A855F7" stroke-width="1.5" marker-end="url(#sarr)"/>
+      <!-- IN_PROGRESS → COMPLETED -->
+      <line x1="775" y1="178" x2="800" y2="118" stroke="#10B981" stroke-width="2" marker-end="url(#garr)"/>
+      <text x="782" y="145" fill="#34D399" font-size="9">success</text>
+      <!-- IN_PROGRESS → FAILED -->
+      <line x1="775" y1="198" x2="800" y2="248" stroke="#EF4444" stroke-width="2" marker-end="url(#rarr)"/>
+      <text x="783" y="228" fill="#FCA5A5" font-size="9">error</text>
+      <!-- COMPLETED → VALIDATED -->
+      <line x1="900" y1="108" x2="917" y2="78" stroke="#10B981" stroke-width="2" marker-end="url(#garr)"/>
+      <!-- COMPLETED → VAL_FAILED -->
+      <line x1="900" y1="118" x2="917" y2="138" stroke="#F59E0B" stroke-width="2" marker-end="url(#yarr)"/>
+      <!-- FAILED → RETRY_PENDING -->
+      <line x1="850" y1="276" x2="790" y2="320" stroke="#F59E0B" stroke-width="1.5" marker-end="url(#yarr)"/>
+      <!-- FAILED → FAILED_PERMANENT -->
+      <line x1="900" y1="258" x2="917" y2="320" stroke="#DC2626" stroke-width="1.5" marker-end="url(#rarr)"/>
+      <text x="950" y="300" fill="#F87171" font-size="9">max_attempts</text>
+      <!-- RETRY_PENDING → QUEUED -->
+      <path d="M 670 328 Q 560 370 480 210" stroke="#F59E0B" stroke-width="1.5" fill="none" marker-end="url(#yarr)" stroke-dasharray="5,3"/>
+      <text x="520" y="368" fill="#FCD34D" font-size="9">requeue</text>
+      <!-- DISCOVERED → SKIPPED -->
+      <line x1="65" y1="206" x2="55" y2="307" stroke="#6B7280" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#sarr)"/>
+      <text x="30" y="262" fill="#6B7280" font-size="9">view/non-delta</text>
+    </svg>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB: MULTI-PARTY ═══════════════════════════════════ -->
+<div id="pane-multi" class="hidden space-y-6">
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-4 text-white">👥 Multi-Party Parallel Execution</h2>
+    <p class="text-sm text-gray-400 mb-6">Each team/user runs with a unique <span class="font-mono text-orange-300">batch_id</span>. They operate on completely isolated record subsets. No locking, no interference, fully concurrent.</p>
+
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <!-- Batch A -->
+      <div class="rounded-xl border-2 border-blue-600 overflow-hidden">
+        <div class="px-4 py-3 font-bold text-blue-300 text-sm" style="background:#0A1A3A">
+          🟦 Batch A — team-alpha
+        </div>
+        <div class="p-4 space-y-2">
+          <div class="text-xs text-gray-400">batch_id = <span class="font-mono text-blue-300">team-alpha-q3</span></div>
+          <div class="text-xs text-gray-400">source: azure_uc_demo_region2</div>
+          <div class="text-xs text-gray-400">max_concurrent_chunks: 3</div>
+          <div class="space-y-1 mt-3">
+            <div class="rounded px-2 py-1 text-xs" style="background:#0A2010;color:#34D399">Chunk 1 ▶ RUNNING (8 exec)</div>
+            <div class="rounded px-2 py-1 text-xs" style="background:#0A2010;color:#34D399">Chunk 2 ▶ RUNNING (8 exec)</div>
+            <div class="rounded px-2 py-1 text-xs" style="background:#1F2937;color:#9CA3AF">Chunk 3 ⏳ QUEUED</div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Tables: 45 | Progress: 22/45</div>
+        </div>
+      </div>
+
+      <!-- Batch B -->
+      <div class="rounded-xl border-2 border-purple-600 overflow-hidden">
+        <div class="px-4 py-3 font-bold text-purple-300 text-sm" style="background:#1F0F3D">
+          🟪 Batch B — team-beta
+        </div>
+        <div class="p-4 space-y-2">
+          <div class="text-xs text-gray-400">batch_id = <span class="font-mono text-purple-300">team-beta-poc</span></div>
+          <div class="text-xs text-gray-400">source: ril_sandbox_ucsync_xws</div>
+          <div class="text-xs text-gray-400">max_concurrent_chunks: 2</div>
+          <div class="space-y-1 mt-3">
+            <div class="rounded px-2 py-1 text-xs" style="background:#0A2010;color:#34D399">Chunk 1 ▶ RUNNING (8 exec)</div>
+            <div class="rounded px-2 py-1 text-xs" style="background:#0A2010;color:#34D399">Chunk 2 ▶ RUNNING (8 exec)</div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Tables: 20 | Progress: 8/20</div>
+        </div>
+      </div>
+
+      <!-- Batch C -->
+      <div class="rounded-xl border-2 border-green-600 overflow-hidden">
+        <div class="px-4 py-3 font-bold text-green-300 text-sm" style="background:#0A2010">
+          🟩 Batch C — team-gamma
+        </div>
+        <div class="p-4 space-y-2">
+          <div class="text-xs text-gray-400">batch_id = <span class="font-mono text-green-300">team-gamma-dr</span></div>
+          <div class="text-xs text-gray-400">source: samples.nyctaxi</div>
+          <div class="text-xs text-gray-400">max_concurrent_chunks: 1</div>
+          <div class="space-y-1 mt-3">
+            <div class="rounded px-2 py-1 text-xs" style="background:#0A2010;color:#34D399">Chunk 1 ▶ RUNNING (8 exec)</div>
+            <div class="rounded px-2 py-1 text-xs" style="background:#1F2937;color:#9CA3AF">Chunk 2 ⏳ QUEUED</div>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Tables: 12 | Progress: 5/12</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Total cluster calc -->
+    <div class="p-4 rounded-lg" style="background:#1F2937;border:1px solid #374151">
+      <div class="text-sm font-bold text-white mb-3">📊 Total Live Clusters = Sum of max_concurrent_chunks per active batch</div>
+      <div class="grid grid-cols-4 gap-4 text-xs">
+        <div class="text-center"><div class="text-2xl font-bold text-blue-300">3</div><div class="text-gray-400">Batch A chunks</div></div>
+        <div class="text-center"><div class="text-2xl font-bold text-purple-300">2</div><div class="text-gray-400">Batch B chunks</div></div>
+        <div class="text-center"><div class="text-2xl font-bold text-green-300">1</div><div class="text-gray-400">Batch C chunk</div></div>
+        <div class="text-center"><div class="text-2xl font-bold text-orange-300">= 6</div><div class="text-gray-400">Total live clusters<br/>(48 executor nodes)</div></div>
+      </div>
+    </div>
+
+    <!-- migration_control isolation -->
+    <div class="mt-4 p-4 rounded-lg" style="background:#0D1117;border:1px solid #30363D">
+      <div class="text-sm font-bold text-white mb-2">🔒 Isolation via batch_id column in migration_control</div>
+      <div class="font-mono text-xs text-gray-300 space-y-1">
+        <div><span class="text-gray-500">-- INVENTORY and DEEP_CLONE always filter by batch_id</span></div>
+        <div><span class="text-purple-300">SELECT</span> * <span class="text-purple-300">FROM</span> migration_control</div>
+        <div><span class="text-purple-300">WHERE</span> batch_id = <span class="text-green-300">'team-alpha-q3'</span>   <span class="text-gray-500">-- Team A sees ONLY their records</span></div>
+        <div class="mt-1"><span class="text-gray-500">-- Atomic UPDATE guards prevent double-acquisition:</span></div>
+        <div><span class="text-purple-300">UPDATE</span> migration_control <span class="text-purple-300">SET</span> status = <span class="text-green-300">'ASSIGNED'</span></div>
+        <div><span class="text-purple-300">WHERE</span> migration_id = <span class="text-green-300">'uuid-xyz'</span> <span class="text-purple-300">AND</span> status = <span class="text-green-300">'QUEUED'</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════ TAB: CLONE MODES ═══════════════════════════════════ -->
+<div id="pane-clone" class="hidden space-y-6">
+  <div class="card p-6">
+    <h2 class="text-lg font-bold mb-4 text-white">🗄 Deep Clone Modes</h2>
+    <div class="grid grid-cols-2 gap-6">
+      <!-- Delta Share Mode -->
+      <div class="rounded-xl border-2 border-purple-600 p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="w-8 h-8 rounded flex items-center justify-center text-base" style="background:#3B1F5E">🔗</div>
+          <div>
+            <div class="font-bold text-purple-300">Delta Share Mode</div>
+            <div class="text-xs text-gray-400">clone_type = delta_share</div>
+          </div>
+        </div>
+        <div class="text-xs text-gray-300 mb-3">Source table is accessible via Unity Catalog FQN (same metastore or Delta Sharing). Clone uses fully-qualified name directly.</div>
+        <div class="rounded-lg p-3 font-mono text-xs" style="background:#1F0F3D;border:1px solid #7C3AED">
+          <div class="text-gray-500 mb-1">-- Clone SQL generated:</div>
+          <div class="text-purple-200">CREATE OR REPLACE TABLE</div>
+          <div class="text-green-300 pl-4">`tgt_cat`.`schema`.`table`</div>
+          <div class="text-purple-200">DEEP CLONE</div>
+          <div class="text-blue-300 pl-4">`src_cat`.`schema`.`table`</div>
+        </div>
+        <div class="mt-3 space-y-1 text-xs">
+          <div class="flex items-center gap-2"><span class="text-green-400">✓</span><span class="text-gray-300">No path resolution needed</span></div>
+          <div class="flex items-center gap-2"><span class="text-green-400">✓</span><span class="text-gray-300">Works across UC metastores via Delta Sharing</span></div>
+          <div class="flex items-center gap-2"><span class="text-green-400">✓</span><span class="text-gray-300">No ADLS firewall/storage credential issues</span></div>
+          <div class="flex items-center gap-2"><span class="text-yellow-400">⚠</span><span class="text-gray-300">Requires source catalog visible on target</span></div>
+        </div>
+      </div>
+
+      <!-- Direct ADLS Mode -->
+      <div class="rounded-xl border-2 border-blue-600 p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="w-8 h-8 rounded flex items-center justify-center text-base" style="background:#0A1A3A">💾</div>
+          <div>
+            <div class="font-bold text-blue-300">Direct ADLS Mode</div>
+            <div class="text-xs text-gray-400">clone_type = direct_adls</div>
+          </div>
+        </div>
+        <div class="text-xs text-gray-300 mb-3">DESCRIBE DETAIL resolves the abfss:// path of the source table. Clone uses the raw ADLS path — no UC dependency on source.</div>
+        <div class="rounded-lg p-3 font-mono text-xs" style="background:#0A1A3A;border:1px solid #3B82F6">
+          <div class="text-gray-500 mb-1">-- Clone SQL generated:</div>
+          <div class="text-purple-200">CREATE OR REPLACE TABLE</div>
+          <div class="text-green-300 pl-4">`tgt_cat`.`schema`.`table`</div>
+          <div class="text-purple-200">DEEP CLONE delta.</div>
+          <div class="text-yellow-300 pl-4">`abfss://container@acct.dfs.../path`</div>
+        </div>
+        <div class="mt-3 space-y-1 text-xs">
+          <div class="flex items-center gap-2"><span class="text-green-400">✓</span><span class="text-gray-300">Works across completely separate metastores</span></div>
+          <div class="flex items-center gap-2"><span class="text-green-400">✓</span><span class="text-gray-300">No Delta Sharing setup required</span></div>
+          <div class="flex items-center gap-2"><span class="text-yellow-400">⚠</span><span class="text-gray-300">Requires External Location on target for src ADLS</span></div>
+          <div class="flex items-center gap-2"><span class="text-yellow-400">⚠</span><span class="text-gray-300">Managed UC tables → falls back to FQN clone</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fallback logic -->
+    <div class="mt-4 p-4 rounded-lg" style="background:#1F2937;border:1px solid #374151">
+      <div class="text-sm font-bold text-white mb-2">🔀 Automatic Fallback Logic (in chunk_worker_notebook)</div>
+      <div class="font-mono text-xs text-gray-300 space-y-1">
+        <div><span class="text-purple-300">if</span> clone_type == <span class="text-green-300">"delta_share"</span>:</div>
+        <div class="pl-4">clone_sql = <span class="text-yellow-300">FQN clone</span>  <span class="text-gray-500"># CREATE OR REPLACE ... DEEP CLONE `src`</span></div>
+        <div><span class="text-purple-300">elif</span> src_path.startswith(<span class="text-green-300">"abfss://"</span>):</div>
+        <div class="pl-4">clone_sql = <span class="text-yellow-300">ADLS path clone</span>  <span class="text-gray-500"># DEEP CLONE delta.`abfss://...`</span></div>
+        <div><span class="text-purple-300">else</span>:  <span class="text-gray-500"># no ADLS path (managed UC table, same metastore)</span></div>
+        <div class="pl-4">clone_sql = <span class="text-yellow-300">FQN fallback</span>  <span class="text-gray-500"># avoids LOCATION_OVERLAP errors</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end main -->
+
+<script>
+function showTab(name) {
+  const tabs = ['arch','config','batch','state','multi','clone'];
+  tabs.forEach(t => {
+    document.getElementById('tab-'+t).className =
+      (t===name ? 'tab-active' : 'tab-inactive') +
+      ' px-5 py-2.5 rounded-t-lg text-sm font-semibold transition-all';
+    document.getElementById('pane-'+t).classList.toggle('hidden', t!==name);
+  });
+}
+</script>
+</body>
+</html>

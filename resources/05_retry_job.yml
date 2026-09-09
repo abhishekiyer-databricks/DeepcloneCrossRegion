@@ -1,0 +1,88 @@
+resources:
+  jobs:
+    retry_job:
+      name: "DeepClone 5 - RETRY [${bundle.target}]"
+      description: "Re-queues RETRY_PENDING tables with exponential backoff and re-dispatches clones."
+      tags:
+        team: deepclone
+        phase: retry
+
+      parameters:
+        - name: meta_catalog
+          default: ${var.meta_catalog}
+        - name: meta_schema
+          default: ${var.meta_schema}
+        - name: max_retries
+          default: ${var.max_retries}
+        - name: worker_spark_version
+          default: ${var.worker_spark_version}
+        - name: worker_node_type
+          default: ${var.worker_node_type}
+        - name: batch_id
+          default: ""    # retry only this batch; blank = retry ALL
+        - name: max_concurrent_chunks
+          default: "3"
+        - name: parallel_threads
+          default: "4"
+        - name: min_executors
+          default: "2"
+        - name: worker_notebook_path
+          default: ${var.worker_notebook}   # deployed path to chunk_worker_notebook
+
+      tasks:
+        - task_key: retry
+          notebook_task:
+            notebook_path: ${var.orchestrator_notebook}
+            base_parameters:
+              mode: RETRY
+              input_type: JOB
+              meta_catalog: "{{job.parameters.meta_catalog}}"
+              meta_schema: "{{job.parameters.meta_schema}}"
+              max_retries: "{{job.parameters.max_retries}}"
+              batch_id: "{{job.parameters.batch_id}}"
+              max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
+              parallel_threads: "{{job.parameters.parallel_threads}}"
+              min_executors: "{{job.parameters.min_executors}}"
+              worker_notebook_path: "{{job.parameters.worker_notebook_path}}"
+              worker_cluster_json: >
+                {
+                  "spark_version": "${var.worker_spark_version}",
+                  "instance_pool_id": "${var.instance_pool_id}",
+                  "num_workers": 2,
+                  "spark_env_vars": {
+                    "AZ2AZ_SRC_URL": "{{secrets/deepclone-migration/src-url}}",
+                    "AZ2AZ_SRC_CID": "{{secrets/deepclone-migration/src-cid}}",
+                    "AZ2AZ_SRC_SECRET": "{{secrets/deepclone-migration/src-secret}}",
+                    "AZ2AZ_TGT_URL": "{{secrets/deepclone-migration/tgt-url}}",
+                    "AZ2AZ_TGT_CID": "{{secrets/deepclone-migration/tgt-cid}}",
+                    "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
+                    "AZ2AZ_TGT_WH_ID": "{{secrets/deepclone-migration/tgt-wh-id}}",
+                    "PYTHONPATH": "/dbfs/deepclone_orchestrator"
+                  }
+                }
+          job_cluster_key: orchestrator_cluster
+
+      job_clusters:
+        - job_cluster_key: orchestrator_cluster
+          new_cluster:
+            spark_version: ${var.worker_spark_version}
+            instance_pool_id: ${var.instance_pool_id}
+            num_workers: 2
+            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
+            # clone_type=delta_share (this bundle's default) they're unused placeholders
+            # (keys must still exist in the secret scope, values may be blank) — see the
+            # "Secrets" comment block at the top of databricks.yml for the full rationale.
+            spark_env_vars:
+              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
+              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
+              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
+              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
+              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
+              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
+              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
+              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
+              PYTHONPATH: "${workspace.file_path}"
+
+      email_notifications:
+        on_failure:
+          - vivek.ravichandiran@databricks.com

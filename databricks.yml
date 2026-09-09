@@ -1,0 +1,191 @@
+bundle:
+  name: deepclone_orchestrator
+
+# ── Secrets (Databricks Secret scope: "deepclone-migration") ─────────────────
+# Every job cluster defined in resources/*.yml injects 8 env vars sourced from
+# this scope: AZ2AZ_SRC_URL / SRC_CID / SRC_SECRET / SRC_WH_ID and the TGT_*
+# equivalents (see orchestrator/config.py::_load_env). Whether each side is
+# actually USED at runtime depends entirely on clone_type (set below):
+#   • AZ2AZ_TGT_* — ALWAYS required, for BOTH clone_type values. The target
+#     workspace hosts the control tables and runs all VALIDATE/DEEP_CLONE SQL,
+#     including reading the delta_share catalog when clone_type=delta_share.
+#   • AZ2AZ_SRC_* — ONLY required when clone_type=direct_adls (source SQL
+#     warehouse is queried via DESCRIBE DETAIL to resolve the abfss:// path).
+#     For clone_type=delta_share (this bundle's default — see clone_type
+#     below), the source workspace is never contacted at all: orchestrator_
+#     notebook.py skips src_sql.start_warehouse() entirely for delta_share
+#     (see the _needs_src_warehouse guard), and DEEP_CLONE/RETRY never touch
+#     src_sql/src_api regardless of clone_type. validate_config() in
+#     orchestrator/config.py only enforces these as non-blank when
+#     clone_type=direct_adls, so delta_share deployments are free to leave
+#     the secret VALUES blank/dummy — but the secret KEYS must still exist in
+#     the scope (Databricks resolves {{secrets/scope/key}} at cluster launch
+#     time and fails if the key is missing, even if unused downstream).
+#
+# configs/config.json (a legacy, unused config file from an earlier
+# pre-bundle architecture that duplicated source/target URL+SP+secret fields
+# and was never read by any current orchestrator/*.py code) has been removed
+# — this section plus configs/migration.yaml's source:/target: blocks are now
+# the only places workspace connection info is documented.
+
+# ── Bundle variables (overridable per target) ────────────────────────────────
+variables:
+  meta_catalog:
+    description: "Catalog where migration_control & migration_attempts tables live"
+    default: hive_metastore
+  meta_schema:
+    description: "Schema for control tables"
+    default: migration_meta
+  # ── JOB-mode-only table selection (IGNORED when input_type is YAML or CSV) ───
+  # These four variables are ONLY consulted by InputResolver._resolve_job(),
+  # which only runs when input_type=JOB (i.e. neither yaml_config_path nor
+  # csv_path is set — see input_type/yaml_config_path/csv_path further below).
+  # When input_type is YAML or CSV, source AND target catalog/schema/table for
+  # every migrated table come exclusively from that YAML/CSV file's own
+  # content — these variables are not read at all in that code path, so
+  # editing them has zero effect on YAML/CSV-driven runs.
+  target_catalog:
+    description: "[JOB mode only] Default target catalog for cloned tables"
+    default: hive_metastore
+  source_catalog_filter:
+    description: "[JOB mode only] JSON array of source catalogs to process"
+    default: '["ril_bulk"]'
+  source_schema_filter:
+    description: "[JOB mode only] JSON array of source schemas (catalog.schema)"
+    default: "[]"
+  source_table_filter:
+    description: "[JOB mode only] JSON array of source tables (FQN)"
+    default: "[]"
+  clone_type:
+    # Left BLANK on purpose: when input_type=YAML, migration.yaml's own
+    # `migration.clone_type:` always wins (orchestrator_notebook.py only
+    # applies this variable's value when input_type is JOB or CSV — see the
+    # comment at that assignment). A non-blank default here would show up as
+    # a misleading "(resolved)" value in the Databricks Jobs UI Parameters
+    # panel that contradicts whatever the YAML file actually specifies, even
+    # though it has zero effect on YAML-mode runs. For JOB/CSV mode (which
+    # have no YAML file to read clone_type from), leaving this blank falls
+    # back to OrchestratorConfig's built-in default (direct_adls) — set a
+    # value here only if you want to force a specific mode for JOB/CSV runs.
+    description: "[JOB/CSV mode only, optional] Clone mode override: direct_adls or delta_share. Leave blank to use the built-in default (direct_adls) for JOB/CSV, or defer to the YAML file's own clone_type when input_type=YAML."
+    default: "delta_share"
+  validation_enabled:
+    description: "Enable post-clone validation"
+    default: "true"
+  row_count_validation:
+    # Counts are taken VERSION AS OF the source_version/target_version already
+    # captured in migration_control at inventory/clone time (not the live
+    # current version), so results stay consistent even if source tables get
+    # new writes after cloning. Results are persisted as real columns
+    # (migration_control.source_row_count/target_row_count — latest run) AND
+    # as an append-only audit trail (migration_validation_history — every
+    # run), for later review. Expensive (full COUNT(*) scan both sides) —
+    # set to "false" to skip it for very large tables if needed.
+    description: "Enable row-count validation, counted AS OF the versions recorded in migration_control (expensive — full table scan)"
+    default: "true"
+  max_retries:
+    description: "Max retry attempts per table"
+    default: "3"
+
+  # ── Orchestrator cluster (lightweight control plane, 1-2 nodes) ──────────────
+  worker_spark_version:
+    description: "Spark version for orchestrator + chunk worker clusters"
+    default: "17.3.x-scala2.13"   # 17.3 LTS (Apache Spark 4.0.0, Scala 2.13)
+
+  # ── Chunk worker cluster — one ephemeral cluster per chunk ────────────────────
+  # Standard_D4s_v3: 4 vCPUs, 16 GB RAM per node — lightweight, widely available.
+  worker_node_type:
+    description: "Azure VM type for chunk worker clusters"
+    default: Standard_D4s_v3    # 4 vCPU / 16 GB per node — widely available, avoids E32ds_v5 capacity stockouts
+  setup_node_type:
+    description: "Azure VM type for the lightweight control-table setup job (small & widely available)"
+    default: Standard_D4s_v3    # 4 vCPU / 16 GB — plenty for DDL-only setup
+  worker_num_workers:
+    description: "Number of Spark worker nodes per chunk cluster"
+    default: "2"                  # → 2 executor nodes + 1 driver = 3 nodes total
+
+  # ── Instance pool — used for ALL job_clusters (orchestrator control-plane
+  # clusters) so debugging/iterative test runs start in seconds instead of
+  # minutes (idle pool instances are reused instead of provisioning fresh
+  # on-demand VMs). Node type / provisioning strategy is fixed by the pool
+  # itself, so node_type_id / azure_attributes are omitted wherever this is used.
+  instance_pool_id:
+    description: "Instance pool ID for orchestrator job_clusters (fast start for debugging/dev iteration)"
+    default: "0908-093007-hoped4-pool-q4mi8hia"
+
+  # ── Batch / Chunk execution parameters ────────────────────────────────────────
+  batch_id:
+    description: "User/team isolation key. Multiple parties use different batch_ids to run concurrently."
+    default: ""                   # blank = auto-generated (date + UUID) at runtime
+  max_concurrent_chunks:
+    description: "Max cluster jobs (chunks) running simultaneously PER BATCH. Controls cluster spend."
+    default: "3"                  # e.g. 3 × 8-node clusters = 24 nodes live at once per batch
+  parallel_threads:
+    description: "Clone threads inside each chunk cluster. Each thread = one concurrent DEEP CLONE."
+    default: "4"                  # 4 tables copying simultaneously on the same 8-node cluster
+  chunk_capacity_gb:
+    description: "Soft GB cap per chunk. Tables are bin-packed until this limit. XL tables get own chunk."
+    default: "500"                 # 500 GB per chunk; tune based on cluster memory
+  min_executors:
+    description: "Minimum Spark worker nodes enforced per chunk cluster (overrides worker_num_workers if lower)"
+    default: "2"                  # aligned with worker_num_workers = 2
+
+  # ── Table-selection input source (INVENTORY job) ─────────────────────────────
+  # Set input_type to CSV, YAML, or JOB here to control the migration source
+  # for ALL runs without touching resources/*.yml or passing run-now overrides.
+  # The notebook still auto-detects from whichever path below is non-blank
+  # (csv_path wins over yaml_config_path if both are set), so input_type is
+  # mainly documentation/display here — but keep it consistent with whichever
+  # path you actually set.
+  input_type:
+    description: "Table-selection source for INVENTORY: CSV, YAML, or JOB"
+    default: "CSV"
+  yaml_config_path:
+    # configs/migration.yaml is the ONE canonical config file — it supports
+    # every input flavour (CSV delegation, or catalog/schema/table mappings)
+    # via what's active inside it; see the header comment in that file.
+    # Currently active flavour: CSV delegation → csv_test_ril_bulk_02.csv,
+    # verified end-to-end on 2026-09-08 (onboards all 4 ril_bulk_02 tables:
+    # iot.dim_iot_01/02, marketing.dim_marketing_01/02 → ril_tgt_02.*).
+    description: "Full deployed path to the migration YAML config, used when input_type=YAML"
+    default: ${workspace.file_path}/configs/migration.yaml
+  csv_path:
+    description: "Full deployed path to the CSV table-mapping file, used when input_type=CSV. Leave blank to use YAML instead."
+    default: "${workspace.file_path}/configs/csv_test_ril_bulk_02.csv"
+
+  # Workspace paths
+  orchestrator_notebook:
+    description: "Path to orchestrator_notebook on target workspace"
+    default: ${workspace.file_path}/notebooks/orchestrator_notebook
+  worker_notebook:
+    description: "Path to chunk_worker_notebook on target workspace"
+    default: ${workspace.file_path}/notebooks/chunk_worker_notebook
+  setup_notebook:
+    description: "Path to setup_control_tables notebook"
+    default: ${workspace.file_path}/notebooks/setup_control_tables
+
+# ── Deployment targets ────────────────────────────────────────────────────────
+targets:
+  dev:
+    mode: development
+    workspace:
+      host: https://adb-7405616318078204.4.azuredatabricks.net
+    variables:
+      meta_catalog: ril_migration_catalog
+      meta_schema: migration_meta
+
+  prod:
+    mode: production
+    workspace:
+      host: https://adb-7405616318078204.4.azuredatabricks.net
+    variables:
+      meta_catalog: ril_migration_catalog
+      meta_schema: migration_meta
+
+# ── Workspace file sync ───────────────────────────────────────────────────────
+workspace:
+  root_path: ~/deepclone_orchestrator/${bundle.target}
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+include:
+  - resources/*.yml
