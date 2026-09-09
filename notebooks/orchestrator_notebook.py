@@ -56,6 +56,11 @@ try:
     dbutils.widgets.text("min_executors",         "8")  # worker nodes per cluster
     # ── Target schema override (for same-workspace self-clone tests) ───────────
     dbutils.widgets.text("target_schema", "")  # if set, overrides target schema for all schema-selections
+    # force_reonboard: INVENTORY normally skips tables already COMPLETED/
+    # VALIDATED/FAILED_PERMANENT/SKIPPED (idempotency — see InventoryManager
+    # docstring). Set to "true" to re-onboard them anyway under a fresh
+    # batch_id/run_id (e.g. to re-test the same CSV/YAML end-to-end).
+    dbutils.widgets.dropdown("force_reonboard", "false", ["true", "false"])
 except Exception:
     pass  # widgets already exist or running outside Databricks
 
@@ -191,12 +196,42 @@ _worker_cluster     = _get_widget("worker_cluster_json", "")
 _worker_nb_path     = _get_widget("worker_notebook_path", "")
 # Batch / Chunk parameters
 _batch_id           = _get_widget("batch_id",              "")
+
+# ── Fallback: fetch batch_id directly via the taskValues SDK ────────────────
+# resources/06_full_migration_workflow.yml sets deep_clone/retry/validate's
+# "batch_id" base_parameter to the dynamic value reference
+# "{{tasks.inventory.values.batch_id}}" so they pick up whatever batch_id
+# INVENTORY actually used (explicit or auto-generated) — see the long
+# comment where cfg.batch_id is finalized below for why this matters. In
+# testing, that dynamic-reference substitution did NOT always resolve to the
+# published value inside base_parameters (each downstream task ended up with
+# a genuinely BLANK widget and therefore auto-generated its OWN unrelated
+# batch_id instead of inventory's — confirmed via driver logs: deep_clone and
+# validate each published a different batch_id than inventory did in the
+# same run). Databricks' own docs/community threads note the SDK call
+# (`dbutils.jobs.taskValues.get`) is the more reliable mechanism, so use it
+# directly as a fallback here whenever the widget came back blank and we're
+# in a mode that only ever runs downstream of inventory in this one workflow.
+if not _batch_id.strip() and _wmode in ("DEEP_CLONE", "RETRY", "VALIDATE"):
+    try:
+        _tv_batch_id = dbutils.jobs.taskValues.get(
+            taskKey="inventory", key="batch_id", default="", debugValue="",
+        )
+        if _tv_batch_id:
+            _batch_id = _tv_batch_id
+            log.info("batch_id widget was blank — recovered %s via taskValues.get(taskKey='inventory')", _batch_id)
+    except Exception as _e:
+        # Standalone jobs (03_deep_clone_job.yml / 04_validate_job.yml /
+        # 05_retry_job.yml) have no "inventory" task at all — this always
+        # raises there, which is expected; fall through to auto-generation.
+        log.info("taskValues.get(taskKey='inventory') unavailable (%s) — falling back to batch_id widget/auto-generation", _e)
 _max_chunks         = _get_widget("max_concurrent_chunks", "3")
 _parallel_threads   = _get_widget("parallel_threads",      "4")
 _chunk_capacity_gb  = _get_widget("chunk_capacity_gb",     "50")
 _min_executors      = _get_widget("min_executors",         "8")
 # Target schema override (for same-workspace self-clone tests)
 _tgt_schema_override = _get_widget("target_schema", "")
+_force_reonboard = _get_widget("force_reonboard", "false").strip().lower() == "true"
 
 log.info("Widget values read directly: mode=%s meta=%s.%s", _wmode, _meta_catalog, _meta_schema)
 
@@ -278,6 +313,26 @@ if cfg.worker_cluster_config and not cfg.cluster_pool:
 import getpass as _gp
 _default_batch = f"batch-{datetime.now(tz=timezone.utc).strftime('%Y%m%d')}-{str(uuid.uuid4())[:6]}"
 cfg.batch_id                  = _batch_id or _default_batch
+
+# Publish the effective batch_id as a Databricks Jobs task value so that
+# DOWNSTREAM tasks in the SAME job run (e.g. deep_clone/retry/validate in
+# resources/06_full_migration_workflow.yml) can pick up whatever batch_id
+# THIS task actually used — whether it was explicitly passed in or just
+# auto-generated above. Without this, each task would independently
+# auto-generate its OWN random batch_id whenever the job-level "batch_id"
+# parameter is left blank, so INVENTORY's rows would never be found by
+# DEEP_CLONE/VALIDATE (they all use the SAME job-level parameter value, but
+# each falls back to a DIFFERENT random UUID when it's blank). The matching
+# downstream tasks reference this via "{{tasks.inventory.values.batch_id}}"
+# in their base_parameters instead of "{{job.parameters.batch_id}}".
+# Harmless/no-op outside a job run (e.g. interactive/local) or on task types
+# that don't support taskValues.
+try:
+    dbutils.jobs.taskValues.set(key="batch_id", value=cfg.batch_id)
+    log.info("Published task value batch_id=%s for downstream tasks", cfg.batch_id)
+except Exception as _e:
+    log.info("Could not publish batch_id task value (likely not running as a job task): %s", _e)
+
 try: cfg.max_concurrent_chunks     = int(_max_chunks)
 except ValueError: pass
 try: cfg.parallel_threads_per_chunk = int(_parallel_threads)
@@ -411,6 +466,8 @@ started_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 # COMMAND ----------
 
 # ── 5. MODE dispatch ───────────────────────────────────────────────────────────
+_inventory_stats = None   # populated below only when MODE == INVENTORY; see the
+                           # "metrics" override near the final summary section.
 
 # ─────────────────────────────── INVENTORY ────────────────────────────────────
 if MODE in ("INVENTORY", "DRY_RUN"):
@@ -459,11 +516,15 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             log.info("Reconciled %d stale IN_PROGRESS records", stale)
 
         inv_mgr = InventoryManager(cfg, _disc_sql, tgt_sql, classifier, cfg.run_id)
-        stats   = inv_mgr.run_inventory(selections)
+        stats   = inv_mgr.run_inventory(selections, force=_force_reonboard)
         log.info(
-            "Inventory complete: total=%d onboarded=%d skipped=%d failed=%d",
-            stats["total"], stats["inserted"], stats["skipped"], stats["failed"]
+            "Inventory complete: total=%d onboarded=%d skipped=%d failed=%d force_reonboard=%s",
+            stats["total"], stats["inserted"], stats["skipped"], stats["failed"], _force_reonboard
         )
+        # Ground truth for THIS invocation's own summary — see the
+        # "_inventory_stats" override applied to `metrics` further below for why
+        # this can't just rely on get_run_metrics()'s run_id-scoped DB query.
+        _inventory_stats = stats
 
         # ── Bin-packing: assign chunk_id to THIS BATCH's QUEUED records only ───
         # Filter by cfg.batch_id so parallel inventories don't steal each other's
@@ -679,6 +740,23 @@ else:
 # ── 6. Final metrics and summary ───────────────────────────────────────────────
 ended_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 metrics  = audit.get_run_metrics()
+
+# BUG FIX: get_run_metrics() queries migration_control WHERE run_id = cfg.run_id.
+# That's accurate for DEEP_CLONE/VALIDATE/RETRY (they stamp run_id on every row
+# they touch, including ones whose status doesn't change). It is NOT accurate
+# for INVENTORY: InventoryManager._process_one() intentionally does NOT
+# re-stamp rows it SKIPS (already COMPLETED/VALIDATED/FAILED_PERMANENT/
+# SKIPPED — see its docstring on idempotency), so those rows keep whatever
+# run_id/batch_id a PAST run set. An INVENTORY run that resolves N tables from
+# CSV/YAML but finds all N already done would then show a misleading
+# "Total discovered: 0" here — even though resolution worked fine and the
+# skip was the correct, intentional behavior. Override with the ground-truth
+# counts INVENTORY itself just observed instead.
+if MODE == "INVENTORY" and _inventory_stats is not None:
+    metrics["total"]   = _inventory_stats["total"]
+    metrics["skipped"] = _inventory_stats["skipped"]
+    metrics["failed"]  = _inventory_stats["failed"]
+    metrics["queued"]  = _inventory_stats["inserted"]   # newly (re-)onboarded this run
 
 summary = RunSummary(
     mode       = MODE,

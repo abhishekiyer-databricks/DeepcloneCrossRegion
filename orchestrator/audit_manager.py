@@ -459,13 +459,29 @@ class AuditManager:
     # ── Aggregate metrics ─────────────────────────────────────────────────────
 
     def get_run_metrics(self) -> Dict:
-        """Return aggregated status counts and data volume for the current run."""
+        """
+        Return aggregated status counts and data volume for the current batch.
+
+        BUG FIX (2026-09-09): this used to filter `WHERE run_id = self._run_id`.
+        That is WRONG for every mode except a first-time INVENTORY insert:
+        mark_completed() / mark_failed() / mark_validated() (below) never set
+        run_id on the rows they update — only InventoryManager._upsert()'s
+        INSERT branch stamps run_id, and only for brand-new rows. So a
+        DEEP_CLONE/RETRY/VALIDATE run (or an INVENTORY run that only SKIPPED
+        already-known tables) would filter on a run_id that no row in
+        migration_control actually carries, always yielding an all-zero
+        summary — even though the run did real, correct work. batch_id is
+        the ID that is actually threaded consistently through every mode
+        (INVENTORY sets it at onboard time; DEEP_CLONE/RETRY/VALIDATE all
+        select their work `WHERE batch_id = cfg.batch_id`), so scope the
+        summary by that instead.
+        """
         rows = self._sql.execute(f"""
             SELECT status, COUNT(*) AS n,
                    SUM(size_in_bytes) AS total_bytes,
                    SUM(duration_seconds) AS total_dur
             FROM {self._ctrl}
-            WHERE run_id = '{self._run_id}'
+            WHERE batch_id = '{self._cfg.batch_id}'
             GROUP BY status
         """)
         metrics: Dict = {

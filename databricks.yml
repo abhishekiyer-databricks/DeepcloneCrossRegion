@@ -152,6 +152,18 @@ variables:
   csv_path:
     description: "Full deployed path to the CSV table-mapping file, used when input_type=CSV. Leave blank to use YAML instead."
     default: "${workspace.file_path}/configs/csv_test_ril_bulk_02.csv"
+  force_reonboard:
+    # INVENTORY is idempotent by default: a table already COMPLETED/VALIDATED/
+    # FAILED_PERMANENT/SKIPPED in migration_control is intentionally SKIPPED
+    # on subsequent runs against the same CSV/YAML (see InventoryManager's
+    # docstring) — re-running the same table list twice in a row is expected
+    # to onboard 0 NEW tables, that's not a bug. Set to "true" (at deploy time
+    # here, or as a run-now override) to force those tables to be re-onboarded
+    # under a fresh batch_id/run_id anyway — e.g. to re-exercise the same
+    # table list end-to-end for a repeat test. Left "false" by default so
+    # production runs never accidentally re-clone already-validated tables.
+    description: "Re-onboard tables even if already COMPLETED/VALIDATED (re-test the same CSV/YAML)"
+    default: "false"
 
   # Workspace paths
   orchestrator_notebook:

@@ -52,6 +52,15 @@ resources:
           default: "4"         # clone threads within each cluster
         - name: min_executors
           default: "2"         # worker nodes per chunk cluster
+        # force_reonboard: by default INVENTORY is idempotent — it SKIPS any
+        # table already COMPLETED/VALIDATED/FAILED_PERMANENT/SKIPPED in
+        # migration_control (see InventoryManager docstring), so re-running
+        # against the same CSV/YAML a second time onboards 0 NEW tables (this
+        # is by design — it's not a bug, just idempotency). Set to "true" to
+        # re-onboard everything anyway under a fresh batch_id/run_id — e.g.
+        # to re-exercise the same table list end-to-end for a repeat test.
+        - name: force_reonboard
+          default: "${var.force_reonboard}"
 
       tasks:
         - task_key: inventory
@@ -75,6 +84,7 @@ resources:
               max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
               parallel_threads: "{{job.parameters.parallel_threads}}"
               min_executors: "{{job.parameters.min_executors}}"
+              force_reonboard: "{{job.parameters.force_reonboard}}"
           job_cluster_key: orchestrator_cluster
 
       job_clusters:

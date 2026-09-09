@@ -64,6 +64,13 @@ resources:
           default: ${var.worker_node_type}
         - name: worker_notebook_path
           default: ${var.worker_notebook}   # deployed path to chunk_worker_notebook
+        # force_reonboard: INVENTORY is idempotent by default and SKIPS tables
+        # already COMPLETED/VALIDATED/FAILED_PERMANENT/SKIPPED — see the
+        # matching comment in resources/01_inventory_job.yml. Set to "true" to
+        # re-onboard the same CSV/YAML table list again under a fresh
+        # batch_id/run_id (e.g. to re-exercise a repeat end-to-end test).
+        - name: force_reonboard
+          default: "${var.force_reonboard}"
 
       # ── Tasks ──────────────────────────────────────────────────────────────
       tasks:
@@ -91,6 +98,7 @@ resources:
               max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
               parallel_threads: "{{job.parameters.parallel_threads}}"
               min_executors: "{{job.parameters.min_executors}}"
+              force_reonboard: "{{job.parameters.force_reonboard}}"
           job_cluster_key: orchestrator_cluster
 
         # Task 2: DRY_RUN — runs in parallel with INVENTORY for pre-flight report
@@ -130,7 +138,14 @@ resources:
               row_count_validation: "{{job.parameters.row_count_validation}}"
               max_retries: "{{job.parameters.max_retries}}"
               run_id: "{{job.parameters.run_id}}"
-              batch_id: "{{job.parameters.batch_id}}"
+              # Read from the inventory task's published task value, NOT the raw
+              # job parameter — this is what makes batch_id=blank (auto-generate)
+              # work correctly across the whole workflow: inventory generates one
+              # random batch_id and publishes it via dbutils.jobs.taskValues.set(),
+              # and every downstream task reads that SAME value here instead of
+              # each independently generating its own random ID. See the comment
+              # in notebooks/orchestrator_notebook.py at the taskValues.set() call.
+              batch_id: "{{tasks.inventory.values.batch_id}}"
               max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
               parallel_threads: "{{job.parameters.parallel_threads}}"
               chunk_capacity_gb: "{{job.parameters.chunk_capacity_gb}}"
@@ -169,7 +184,10 @@ resources:
               meta_schema: "{{job.parameters.meta_schema}}"
               max_retries: "{{job.parameters.max_retries}}"
               run_id: "{{job.parameters.run_id}}"
-              batch_id: "{{job.parameters.batch_id}}"
+              # See the comment on the deep_clone task above — read from the
+              # published task value so this matches inventory's/deep_clone's
+              # batch_id even when it was auto-generated (job parameter blank).
+              batch_id: "{{tasks.inventory.values.batch_id}}"
               max_concurrent_chunks: "{{job.parameters.max_concurrent_chunks}}"
               parallel_threads: "{{job.parameters.parallel_threads}}"
               min_executors: "{{job.parameters.min_executors}}"
@@ -206,7 +224,8 @@ resources:
               validation_enabled: "true"
               row_count_validation: "{{job.parameters.row_count_validation}}"
               run_id: "{{job.parameters.run_id}}"
-              batch_id: "{{job.parameters.batch_id}}"
+              # See the comment on the deep_clone task above.
+              batch_id: "{{tasks.inventory.values.batch_id}}"
           job_cluster_key: orchestrator_cluster
 
       # ── Shared job cluster ─────────────────────────────────────────────────

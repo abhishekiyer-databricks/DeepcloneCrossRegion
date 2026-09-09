@@ -249,6 +249,14 @@ class InventoryManager:
           source_num_files  = {rec.source_num_files or 0},
           source_version    = {rec.source_version or 0},
           batch_id          = '{batch_id_val}',
+          -- Target mapping can legitimately change between onboards (e.g. a
+          -- CSV/YAML edit renames the target table) — without updating these,
+          -- a re-onboarded (esp. force_reonboard=true) row silently kept
+          -- whichever target_catalog/schema/table it was FIRST inserted
+          -- with, ignoring the current CSV/YAML's mapping.
+          target_catalog    = '{rec.target_catalog}',
+          target_schema     = '{rec.target_schema}',
+          target_table      = '{rec.target_table}',
           -- Re-onboarding resets this row to a genuinely fresh QUEUED state —
           -- clear out any started_at/completed_at/failed_at/error_code/
           -- error_message left over from a PREVIOUS run's abandoned attempt
@@ -262,6 +270,18 @@ class InventoryManager:
           failed_at         = NULL,
           error_code        = NULL,
           error_message     = NULL,
+          -- validation_status/row counts also MUST be cleared on re-onboard:
+          -- mark_validated() sets validation_status='VALIDATED' and stamps
+          -- source_row_count/target_row_count once. The VALIDATE loop
+          -- (orchestrator_notebook.py) explicitly SKIPS any record whose
+          -- validation_status is already 'VALIDATED' (it assumes that means
+          -- "already checked, nothing changed"). But a force_reonboard re-run
+          -- physically re-clones the table — the old VALIDATED verdict and
+          -- row counts are stale and must not be trusted (or displayed) until
+          -- VALIDATE genuinely re-checks the fresh clone.
+          validation_status = NULL,
+          source_row_count  = NULL,
+          target_row_count  = NULL,
           onboarded_at      = TIMESTAMP '{rec.onboarded_at}',
           queued_at         = TIMESTAMP '{rec.queued_at}',
           updated_at        = TIMESTAMP '{rec.updated_at}'
