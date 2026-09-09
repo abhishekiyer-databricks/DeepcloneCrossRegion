@@ -1,7 +1,7 @@
 # DeepClone CrossRegion — SOP: Running a CSV-based Migration (`input_type = CSV`, `clone_type = delta_share`)
 
 **Document ID:** SOP-DCR-CSV-01
-**Version:** 1.1
+**Version:** 1.2
 **Owner:** Data Platform Engineering
 **Applies to bundle:** `deepclone_orchestrator` (`databricks.yml`)
 **Classification:** Internal — Data Engineering
@@ -12,7 +12,7 @@
 
 1. [Purpose & Scope](#1-purpose--scope)
 2. [Architecture Overview](#2-architecture-overview)
-3. [Prerequisites](#3-prerequisites)
+3. [Prerequisites](#3-prerequisites) ([3.1 — confirm source is Delta Shared](#31--mandatory-confirm-the-source-catalogtables-are-already-delta-shared-into-the-target-metastore))
 4. [Step 1 — Prepare the CSV table-mapping file](#step-1--prepare-the-csv-table-mapping-file)
 5. [Step 2 — Point `databricks.yml` at your CSV](#step-2--point-databricksyml-at-your-csv)
 6. [Step 3 — Deploy the bundle](#step-3--deploy-the-bundle)
@@ -62,6 +62,8 @@ The bundle deploys 7 jobs. A CSV run only touches **INVENTORY → DEEP_CLONE →
 
 Everything is scoped by **`batch_id`** — the isolation key. Every table row in `migration_control` carries the `batch_id` of the run that onboarded it, so multiple teams/loads can run in parallel without interfering, and you always filter your audit queries by `batch_id`.
 
+**Important assumption behind `clone_type=delta_share`:** the orchestrator never calls the Delta Sharing REST API itself. For every mode, it resolves and reads `source_catalog` through the **target** workspace's own Unity Catalog clients (`InputResolver`'s `_disc_api`/`_disc_sql` and `Validator`'s `_val_src_sql` are both bound to the target workspace when `clone_type=delta_share` — see `orchestrator_notebook.py`). In other words: **the pipeline assumes `source_catalog` is already a name that the target workspace's metastore can see and query** — either because source and target are literally in the same metastore, or because the source catalog has already been published as a Delta Share and mounted as a catalog in the target metastore *before you ever run this SOP*. §3.1 below is the mandatory pre-flight check for this.
+
 ---
 
 ## 3. Prerequisites
@@ -70,10 +72,52 @@ Everything is scoped by **`batch_id`** — the isolation key. Every table row in
 |---|---|---|
 | 1 | Bundle already deployed at least once (`databricks bundle deploy -t prod --profile <profile>`) | `databricks bundle summary -t prod --profile <profile>` |
 | 2 | `setup_control_tables_job` has been run at least once against the target `meta_catalog.meta_schema` | `SHOW TABLES IN <meta_catalog>.<meta_schema>` → `migration_control`, `migration_attempts`, `migration_validation_history` exist |
-| 3 | Source tables are Delta tables, visible to the target workspace (same metastore or via Delta Sharing) | `DESCRIBE DETAIL <source_catalog>.<source_schema>.<source_table>` succeeds from the target workspace |
+| 3 | **Source tables are already Delta Shared / visible from the TARGET workspace — see §3.1, mandatory, check first** | `DESCRIBE DETAIL <source_catalog>.<source_schema>.<source_table>` run from the **target** workspace's SQL warehouse succeeds |
 | 4 | Target catalog/schema exist, or the run's service principal can create them | `SHOW GRANTS ON CATALOG <target_catalog>` |
 | 5 | Instance pool configured in `databricks.yml` (`instance_pool_id`) is warm/available | Databricks UI → Compute → Instance Pools |
 | 6 | `databricks` CLI configured with a working profile | `databricks bundle validate -t prod --profile <profile>` |
+
+### 3.1 — MANDATORY: confirm the source catalog/tables are already Delta Shared into the target metastore
+
+**Do this before touching any CSV/YAML in Step 1.** This is the single most common reason a CSV run resolves 0 tables or fails with `TABLE_OR_VIEW_NOT_FOUND`/`SCHEMA_NOT_FOUND` (see G2) — the pipeline never provisions the Delta Share itself, it only *consumes* a `source_catalog` that must already resolve from the target workspace.
+
+**Case A — source and target already in the same Unity Catalog metastore** (e.g. same-workspace or sibling-workspace tests, like the `ril_bulk_02`/`ril_bulk_csvtest` → `ril_tgt_02` examples used throughout this SOP): nothing extra to do — any catalog in the metastore is already visible to every workspace attached to it. Just run the verification query below to confirm.
+
+**Case B — true cross-region / cross-metastore migration** (the general case this bundle — `DeepcloneCrossRegion` — is built for): the source catalog must be published as a Delta Share **before Step 1**. On the **source** metastore (run as a principal with `CREATE SHARE`/`USE CATALOG` privileges there):
+
+```sql
+-- 1. Create (or reuse) a share and add the schema(s)/table(s) you're migrating
+CREATE SHARE IF NOT EXISTS <share_name>
+  COMMENT 'DeepClone cross-region source share for <source_catalog>';
+ALTER SHARE <share_name> ADD SCHEMA <source_catalog>.<source_schema>;   -- whole schema
+-- or, for a hand-picked subset instead of a whole schema:
+-- ALTER SHARE <share_name> ADD TABLE <source_catalog>.<source_schema>.<source_table>;
+
+-- 2. Create a recipient for the target metastore (Databricks-to-Databricks sharing)
+CREATE RECIPIENT IF NOT EXISTS <recipient_name>
+  USING ID '<target_metastore_id>';   -- target's Account Console -> Metastore -> "Metastore ID"
+
+-- 3. Grant the recipient access
+GRANT SELECT ON SHARE <share_name> TO RECIPIENT <recipient_name>;
+```
+
+Then on the **target** metastore (the workspace this bundle is deployed to):
+
+```sql
+-- 4. Confirm the share was received, then mount it as a catalog
+SHOW PROVIDERS;
+CREATE CATALOG IF NOT EXISTS <source_catalog> USING SHARE <provider_name>.<share_name>;
+```
+
+**Verification (run this from the TARGET workspace's SQL warehouse — the same warehouse `configs/migration.yaml`'s `meta_catalog`/`meta_schema` points at) before proceeding to Step 1, for every source catalog/schema you plan to put in the CSV:**
+
+```sql
+SHOW SCHEMAS IN <source_catalog>;
+SHOW TABLES IN <source_catalog>.<source_schema>;
+DESCRIBE DETAIL <source_catalog>.<source_schema>.<source_table>;
+```
+
+All three must succeed and use the **exact same `source_catalog`/`source_schema`/`source_table` names** you're about to type into the CSV — `InputResolver` and `Validator` both query these names directly through the target workspace's clients, with no fallback to the "real" source workspace when `clone_type=delta_share`.
 
 ---
 
@@ -322,6 +366,7 @@ Without this, the repaired task falls back to the job's blank default `batch_id`
 Two different root causes, both fixed in the current code but worth knowing about:
 
 - **Genuinely 0 rows resolved** — almost always one of:
+  - **`source_catalog` isn't actually visible from the target workspace yet** — see §3.1. This is the #1 cause on a real cross-region run: the source catalog hasn't been Delta Shared/mounted into the target metastore, so `SHOW SCHEMAS`/`SHOW TABLES` against it returns nothing (or errors), and `InputResolver` silently resolves 0 selections for a `catalog`/`schema`-type row. Re-run the §3.1 verification query first.
   - `csv_path` resolved to a doubled/relative path (e.g. a YAML file's own `csv_path:` field is relative to *that YAML's* directory, not the repo root) — use the full bundle-deployed path.
   - `yaml_config_path` was non-blank and took precedence unexpectedly — check `effective_input_path` in the INVENTORY log line `Input: type=... effective_input_path=...`.
   - (Format B only) a row's `clone_type` cell is misspelled/blank when it shouldn't be, or a required column for that row type is empty — check the notebook log for `CSV row N ... skipping` warnings.
@@ -418,6 +463,7 @@ GROUP BY 1 ORDER BY 1 DESC;
 
 | Version | Date | Author | Change |
 |---|---|---|---|
+| 1.2 | 2026-09-09 | Data Platform Engineering | Added §3.1 — mandatory pre-flight check that `source_catalog`/`source_schema`/`source_table` are already Delta Shared and mounted (or same-metastore visible) from the **target** workspace before Step 1, with the source-side (`CREATE SHARE`/`ADD SCHEMA`/`CREATE RECIPIENT`/`GRANT`) and target-side (`CREATE CATALOG ... USING SHARE`) setup commands for a true cross-metastore migration, plus a verification query (`SHOW SCHEMAS`/`SHOW TABLES`/`DESCRIBE DETAIL`). Cross-referenced from G2 as the #1 real-world cause of "0 tables resolved". |
 | 1.1 | 2026-09-09 | Data Platform Engineering | Added CSV **Format B** (row-level `catalog`/`schema`/`table` selection with `exclude_schemas`/`exclude_tables`, `InputResolver._expand_mapping_entry()`), documented `batch_id` auto-generation + cross-task propagation fix, `force_reonboard` parameter, and the `run_id`→`batch_id` run-summary rescoping fix (G2/G6/G7). Format B verified end-to-end on a new `ril_bulk_csvtest` test catalog (schemas `finance`/`hr`, 10 tables) → `ril_tgt_02`, all 3 row types + both exclusion columns in one file, batch `batch-csvformat-test-01`. |
 | 1.0 | 2026-09-09 | Data Platform Engineering | Initial CSV-run SOP, with screenshots from the verified end-to-end run on `ril_bulk_02` → `ril_tgt_02` (`clone_type=delta_share`) |
 
