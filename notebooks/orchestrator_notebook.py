@@ -22,6 +22,8 @@
 # MAGIC | `validation_enabled` | true/false |
 # MAGIC | `row_count_validation` | true/false (expensive) |
 # MAGIC | `run_id` | Optional explicit run identifier |
+# MAGIC | `target_warehouse_id` | SQL warehouse id (plain, non-secret) for control-table SQL. No client_id/client_secret needed — auth is native (`databricks.sdk.core.Config()`). |
+# MAGIC | `source_warehouse_id` | [direct_adls only] source SQL warehouse id. Unused for delta_share. |
 
 # COMMAND ----------
 
@@ -52,6 +54,13 @@ try:
     dbutils.widgets.text("run_id", "")
     dbutils.widgets.text("meta_catalog", "hive_metastore")
     dbutils.widgets.text("meta_schema",  "migration_meta")
+    # target_warehouse_id / source_warehouse_id: plain (non-secret) SQL
+    # warehouse identifiers — NOT credentials. SqlClient/ApiClient authenticate
+    # natively via databricks.sdk.core.Config() (no client_id/client_secret,
+    # no Databricks Secret scope). source_warehouse_id is only consulted when
+    # clone_type=direct_adls; leave it blank for delta_share.
+    dbutils.widgets.text("target_warehouse_id", "")
+    dbutils.widgets.text("source_warehouse_id", "")
     dbutils.widgets.text("worker_cluster_json", "")
     dbutils.widgets.text("worker_notebook_path", "")  # deployed path to chunk_worker_notebook
     # ── Batch / Chunk parameters (Section 8 — new) ────────────────────────────
@@ -217,6 +226,8 @@ _meta_catalog       = _get_widget("meta_catalog",       "hive_metastore")
 _meta_schema        = _get_widget("meta_schema",        "migration_meta")
 _worker_cluster     = _get_widget("worker_cluster_json", "")
 _worker_nb_path     = _get_widget("worker_notebook_path", "")
+_target_wh_id       = _get_widget("target_warehouse_id", "")
+_source_wh_id       = _get_widget("source_warehouse_id", "")
 # Batch / Chunk parameters
 _batch_id           = _get_widget("batch_id",              "")
 
@@ -274,6 +285,13 @@ if _input_type != "YAML" and _clone_type.strip():
     cfg.clone_type = _clone_type
 cfg.meta_catalog         = _meta_catalog
 cfg.meta_schema          = _meta_schema
+# Plain (non-secret) SQL warehouse ids — only override cfg if the widget was
+# actually supplied, so a YAML file's own target.warehouse_id (if set) isn't
+# silently clobbered by a blank job-parameter default.
+if _target_wh_id.strip():
+    cfg.target_warehouse_id = _target_wh_id.strip()
+if _source_wh_id.strip():
+    cfg.source_warehouse_id = _source_wh_id.strip()
 cfg.validation_enabled   = _val_enabled.lower() == "true"
 cfg.row_count_validation = _row_cnt_val.lower() == "true"
 try: cfg.max_retries     = int(_max_retries)
@@ -433,24 +451,23 @@ if cfg_errors:
 # COMMAND ----------
 
 # ── 3. Initialise clients ──────────────────────────────────────────────────────
+# No client_id/client_secret/Databricks Secret scope anywhere here — auth is
+# native via databricks.sdk.core.Config() inside SqlClient/ApiClient. Blank
+# workspace_url auto-detects the current/attached workspace.
 src_sql = SqlClient(
-    workspace_url = cfg.source_workspace_url,
-    client_id     = cfg.source_client_id,
-    client_secret = cfg.source_client_secret,
     warehouse_id  = cfg.source_warehouse_id,
+    workspace_url = cfg.source_workspace_url,
     throttle_s    = cfg.api_throttle_delay_s,
 )
 
 tgt_sql = SqlClient(
-    workspace_url = cfg.target_workspace_url,
-    client_id     = cfg.target_client_id,
-    client_secret = cfg.target_client_secret,
     warehouse_id  = cfg.target_warehouse_id,
+    workspace_url = cfg.target_workspace_url,
     throttle_s    = cfg.api_throttle_delay_s,
 )
 
-src_api = ApiClient(cfg.source_workspace_url, cfg.source_client_id, cfg.source_client_secret)
-tgt_api = ApiClient(cfg.target_workspace_url, cfg.target_client_id, cfg.target_client_secret)
+src_api = ApiClient(cfg.source_workspace_url)
+tgt_api = ApiClient(cfg.target_workspace_url)
 
 # Start warehouses if needed.
 # The SOURCE warehouse is only ever touched by INVENTORY/DRY_RUN/VALIDATE, and

@@ -8,12 +8,15 @@ Tables created in {meta_catalog}.{meta_schema}:
   migration_control   — per-table state machine (Section 10.1)
   migration_attempts  — immutable execution history (Section 10.2)
 
-Usage:
-  # Set env vars then run:
-  export AZ2AZ_TGT_URL="https://adb-..."
-  export AZ2AZ_TGT_CID="..."
-  export AZ2AZ_TGT_SECRET="..."
-  export AZ2AZ_TGT_WH_ID="..."
+Authentication: no client_id/client_secret/Databricks Secret scope needed.
+SqlClient authenticates natively via databricks.sdk.core.Config() — automatic
+when this runs inside a Databricks job/notebook. Only a plain (non-secret)
+SQL warehouse id is required, passed via the `target_warehouse_id` job
+parameter/widget (or the AZ2AZ_TGT_WH_ID env var for standalone script usage).
+
+Usage (standalone, outside a Databricks job — requires standard Databricks
+SDK auth configured, e.g. `databricks auth login` / DATABRICKS_CONFIG_PROFILE):
+  export AZ2AZ_TGT_WH_ID="<warehouse-id>"
   python3 setup_control_tables.py
 """
 
@@ -35,12 +38,6 @@ for _p in [
 
 from orchestrator.sql_client import SqlClient
 
-# ── Config ────────────────────────────────────────────────────────────────────
-TGT_URL    = os.environ["AZ2AZ_TGT_URL"]
-TGT_CID    = os.environ["AZ2AZ_TGT_CID"]
-TGT_SECRET = os.environ["AZ2AZ_TGT_SECRET"]
-TGT_WH_ID  = os.environ["AZ2AZ_TGT_WH_ID"]
-
 def _get_param(name: str, default: str) -> str:
     """Read a value from the Databricks job's notebook widget (base_parameters)
     first — that's how meta_catalog/meta_schema are actually passed by the DAB
@@ -50,10 +47,22 @@ def _get_param(name: str, default: str) -> str:
     except Exception:
         return os.environ.get(name.upper(), default)
 
+# ── Config ────────────────────────────────────────────────────────────────────
+# TGT_WH_ID is a plain (non-secret) SQL warehouse identifier — NOT a
+# credential. No client_id/client_secret/workspace_url needed: SqlClient
+# authenticates natively via databricks.sdk.core.Config(), which auto-detects
+# the current workspace/run's own auth context.
+TGT_WH_ID    = _get_param("target_warehouse_id", "")
 META_CATALOG = _get_param("meta_catalog", "azure_uc_demo_region1")
 META_SCHEMA  = _get_param("meta_schema",  "migration_meta")
 
-sql = SqlClient(TGT_URL, TGT_CID, TGT_SECRET, TGT_WH_ID)
+if not TGT_WH_ID:
+    raise ValueError(
+        "target_warehouse_id widget/job-parameter (or AZ2AZ_TGT_WH_ID env var) "
+        "is required — it's a plain SQL warehouse id, not a secret."
+    )
+
+sql = SqlClient(warehouse_id=TGT_WH_ID)
 
 print(f"Setting up control tables in {META_CATALOG}.{META_SCHEMA} ...")
 print("Starting warehouse ...")

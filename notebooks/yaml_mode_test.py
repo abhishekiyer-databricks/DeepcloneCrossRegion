@@ -221,24 +221,21 @@ def common_params():
         "yaml_config_path": YAML_DBFS_PATH.replace("/dbfs", "dbfs:"),
         "validation_enabled": "true",
         "row_count_validation": "false",
+        # Plain (non-secret) SQL warehouse id — required by orchestrator_
+        # notebook.py's SqlClient/ApiClient. No client_id/client_secret needed
+        # (native auth via databricks.sdk.core.Config()). Override via env var
+        # AZ2AZ_TGT_WH_ID if this test notebook's default workspace differs.
+        "target_warehouse_id": os.environ.get("AZ2AZ_TGT_WH_ID", "5fe1692f119e2528"),
     }
 
+# No spark_env_vars/secrets needed — chunk_worker_notebook.py runs DEEP CLONE
+# directly via Spark on its own cluster and never calls SqlClient/ApiClient.
 WORKER_CLUSTER_JSON = json.dumps({
     "spark_version": "15.4.x-scala2.12",
     "node_type_id": "Standard_D4s_v3",
     "num_workers": 2,
     "spark_conf": {"spark.databricks.delta.preview.enabled": "true"},
     "azure_attributes": {"first_on_demand": 1, "availability": "ON_DEMAND_AZURE"},
-    "spark_env_vars": {
-        "AZ2AZ_SRC_URL":    "{{secrets/deepclone-migration/src-url}}",
-        "AZ2AZ_SRC_CID":    "{{secrets/deepclone-migration/src-cid}}",
-        "AZ2AZ_SRC_SECRET": "{{secrets/deepclone-migration/src-secret}}",
-        "AZ2AZ_TGT_URL":    "{{secrets/deepclone-migration/tgt-url}}",
-        "AZ2AZ_TGT_CID":    "{{secrets/deepclone-migration/tgt-cid}}",
-        "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
-        "AZ2AZ_TGT_WH_ID":  "{{secrets/deepclone-migration/tgt-wh-id}}",
-        "PYTHONPATH":       "/dbfs/deepclone_orchestrator",
-    },
 })
 
 results = {}

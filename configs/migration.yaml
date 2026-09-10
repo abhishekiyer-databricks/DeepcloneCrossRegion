@@ -97,12 +97,16 @@ migration:
 # clone_type = delta_share (the active setting above), the source workspace is
 # NEVER contacted directly — tables are read via the shared catalog that
 # already lives on the TARGET workspace, so none of these fields are consulted
-# and leaving everything blank (as below) is correct — no source SP
-# credentials are needed at all for delta_share. Credentials must NOT be
-# stored here regardless of mode — inject via env vars or Databricks Secrets.
+# and leaving everything blank (as below) is correct.
+#
+# No client_id/client_secret/Databricks Secret scope exists anywhere in this
+# project — SqlClient/ApiClient authenticate natively via the Databricks
+# SDK's Config() (automatic when running inside a Databricks job/notebook).
+# warehouse_id below is a plain, non-secret SQL warehouse identifier, usually
+# supplied instead via the `source_warehouse_id` job parameter/widget
+# (databricks.yml's var.source_warehouse_id) rather than here.
 source:
-  workspace_url: ""            # [direct_adls only] override AZ2AZ_SRC_URL env var
-  client_id: ""                # [direct_adls only] override AZ2AZ_SRC_CID env var
+  workspace_url: ""            # [direct_adls only] leave blank to auto-detect
   warehouse_id: ""             # [direct_adls only] required for DESCRIBE DETAIL
 
 
@@ -110,11 +114,13 @@ source:
 # Always required, regardless of clone_type — this is where the control tables
 # (migration_control/migration_attempts) live and where DEEP_CLONE/VALIDATE
 # actually run their SQL, including reading the delta_share catalog for
-# clone_type=delta_share.
+# clone_type=delta_share. No client_id/client_secret here either — see the
+# source: block comment above. warehouse_id is usually supplied instead via
+# the `target_warehouse_id` job parameter/widget (databricks.yml's
+# var.target_warehouse_id).
 target:
-  workspace_url: ""            # override only if different from AZ2AZ_TGT_URL env var
-  client_id: ""                # override only if different from AZ2AZ_TGT_CID env var
-  warehouse_id: ""             # control-table SQL warehouse (AZ2AZ_TGT_WH_ID)
+  workspace_url: ""            # leave blank to auto-detect (current workspace)
+  warehouse_id: ""             # control-table SQL warehouse (plain id, not a secret)
   catalog: hive_metastore      # default target catalog (overridden per mapping)
 
 

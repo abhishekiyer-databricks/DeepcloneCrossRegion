@@ -79,6 +79,15 @@ resources:
         # batch_id/run_id (e.g. to re-exercise a repeat end-to-end test).
         - name: force_reonboard
           default: "${var.force_reonboard}"
+        # target_warehouse_id / source_warehouse_id: plain (non-secret) SQL
+        # warehouse identifiers — NOT credentials. No client_id/client_secret/
+        # secret-scope anywhere: SqlClient/ApiClient authenticate natively via
+        # databricks.sdk.core.Config(). source_warehouse_id is only consulted
+        # when clone_type=direct_adls.
+        - name: target_warehouse_id
+          default: ${var.target_warehouse_id}
+        - name: source_warehouse_id
+          default: ${var.source_warehouse_id}
 
       # ── Tasks ──────────────────────────────────────────────────────────────
       tasks:
@@ -108,6 +117,8 @@ resources:
               parallel_threads: "{{job.parameters.parallel_threads}}"
               min_executors: "{{job.parameters.min_executors}}"
               force_reonboard: "{{job.parameters.force_reonboard}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              source_warehouse_id: "{{job.parameters.source_warehouse_id}}"
           job_cluster_key: orchestrator_cluster
 
         # Task 2: DRY_RUN — runs in parallel with INVENTORY for pre-flight report
@@ -129,6 +140,8 @@ resources:
               clone_type: "{{job.parameters.clone_type}}"
               meta_catalog: "{{job.parameters.meta_catalog}}"
               meta_schema: "{{job.parameters.meta_schema}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              source_warehouse_id: "{{job.parameters.source_warehouse_id}}"
           job_cluster_key: orchestrator_cluster
 
         # Task 3: DEEP_CLONE — runs after INVENTORY completes
@@ -161,22 +174,16 @@ resources:
               chunk_capacity_gb: "{{job.parameters.chunk_capacity_gb}}"
               min_executors: "{{job.parameters.min_executors}}"
               worker_notebook_path: "{{job.parameters.worker_notebook_path}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              # No spark_env_vars needed — chunk_worker_notebook.py runs DEEP
+              # CLONE directly via Spark on its own cluster and never calls
+              # SqlClient/ApiClient, so it has no auth/secrets dependency.
               worker_cluster_json: >
                 {
                   "spark_version": "${var.worker_spark_version}",
                   "instance_pool_id": "${var.instance_pool_id}",
                   "num_workers": 2,
-                  "spark_conf": {"spark.databricks.delta.preview.enabled": "true"},
-                  "spark_env_vars": {
-                    "AZ2AZ_SRC_URL": "{{secrets/deepclone-migration/src-url}}",
-                    "AZ2AZ_SRC_CID": "{{secrets/deepclone-migration/src-cid}}",
-                    "AZ2AZ_SRC_SECRET": "{{secrets/deepclone-migration/src-secret}}",
-                    "AZ2AZ_TGT_URL": "{{secrets/deepclone-migration/tgt-url}}",
-                    "AZ2AZ_TGT_CID": "{{secrets/deepclone-migration/tgt-cid}}",
-                    "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
-                    "AZ2AZ_TGT_WH_ID": "{{secrets/deepclone-migration/tgt-wh-id}}",
-                    "PYTHONPATH": "/dbfs/deepclone_orchestrator"
-                  }
+                  "spark_conf": {"spark.databricks.delta.preview.enabled": "true"}
                 }
           job_cluster_key: orchestrator_cluster
 
@@ -202,19 +209,13 @@ resources:
               parallel_threads: "{{job.parameters.parallel_threads}}"
               min_executors: "{{job.parameters.min_executors}}"
               worker_notebook_path: "{{job.parameters.worker_notebook_path}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              # No spark_env_vars needed (see deep_clone task comment above).
               worker_cluster_json: >
                 {
                   "spark_version": "${var.worker_spark_version}",
                   "instance_pool_id": "${var.instance_pool_id}",
-                  "num_workers": 2,
-                  "spark_env_vars": {
-                    "AZ2AZ_SRC_URL": "{{secrets/deepclone-migration/src-url}}",
-                    "AZ2AZ_TGT_URL": "{{secrets/deepclone-migration/tgt-url}}",
-                    "AZ2AZ_TGT_CID": "{{secrets/deepclone-migration/tgt-cid}}",
-                    "AZ2AZ_TGT_SECRET": "{{secrets/deepclone-migration/tgt-secret}}",
-                    "AZ2AZ_TGT_WH_ID": "{{secrets/deepclone-migration/tgt-wh-id}}",
-                    "PYTHONPATH": "/dbfs/deepclone_orchestrator"
-                  }
+                  "num_workers": 2
                 }
           job_cluster_key: orchestrator_cluster
 
@@ -236,6 +237,8 @@ resources:
               run_id: "{{job.parameters.run_id}}"
               # See the comment on the deep_clone task above.
               batch_id: "{{tasks.inventory.values.batch_id}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              source_warehouse_id: "{{job.parameters.source_warehouse_id}}"
           job_cluster_key: orchestrator_cluster
 
       # ── Shared job cluster ─────────────────────────────────────────────────
@@ -248,19 +251,7 @@ resources:
             spark_conf:
               spark.databricks.delta.preview.enabled: "true"
               spark.sql.adaptive.enabled: "true"
-            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
-            # clone_type=delta_share (this bundle's default) they're unused placeholders
-            # (keys must still exist in the secret scope, values may be blank) — see the
-            # "Secrets" comment block at the top of databricks.yml for the full rationale.
             spark_env_vars:
-              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
-              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
-              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
-              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
-              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
-              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
-              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
-              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
               PYTHONPATH: "${workspace.file_path}"
             cluster_log_conf:
               dbfs:

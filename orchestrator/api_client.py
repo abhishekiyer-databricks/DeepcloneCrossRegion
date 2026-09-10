@@ -1,6 +1,13 @@
 """
 api_client.py — Databricks REST API client (clusters, jobs, Unity Catalog).
 
+Authentication
+--------------
+Uses the Databricks SDK's native/unified authentication (`databricks.sdk.core.Config`)
+— the same mechanism as `sql_client.SqlClient`. No client_id/client_secret or
+Databricks Secret scope is required: when running inside a Databricks job/
+notebook, `Config()` auto-detects the run's own native auth context.
+
 Covers
 ------
 • UC Tables API (list tables with full pagination)
@@ -17,7 +24,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
-from orchestrator.sql_client import TokenCache
+from databricks.sdk.core import Config
 
 log = logging.getLogger(__name__)
 
@@ -39,20 +46,19 @@ class ApiError(RuntimeError):
 class ApiClient:
     """
     Thin wrapper around the Databricks REST APIs needed by the orchestrator.
-    Uses the same TokenCache as SqlClient for a given workspace.
+    Auth comes from `databricks.sdk.core.Config` — no secrets to manage.
     """
 
-    def __init__(self, workspace_url: str, client_id: str, client_secret: str):
-        self._url    = workspace_url.rstrip("/")
-        self._tokens = TokenCache(workspace_url, client_id, client_secret)
+    def __init__(self, workspace_url: str = ""):
+        self._cfg = Config(host=workspace_url) if workspace_url else Config()
+        self._url = self._cfg.host.rstrip("/")
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _h(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._tokens.get()}",
-            "Content-Type":  "application/json",
-        }
+        headers = self._cfg.authenticate()
+        headers["Content-Type"] = "application/json"
+        return headers
 
     def _get(self, path: str, params: Optional[Dict] = None, timeout: int = 30) -> Dict:
         r = requests.get(f"{self._url}{path}", headers=self._h(), params=params, timeout=timeout)

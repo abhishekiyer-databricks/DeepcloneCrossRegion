@@ -1,26 +1,32 @@
 bundle:
   name: deepclone_orchestrator
 
-# ── Secrets (Databricks Secret scope: "deepclone-migration") ─────────────────
-# Every job cluster defined in resources/*.yml injects 8 env vars sourced from
-# this scope: AZ2AZ_SRC_URL / SRC_CID / SRC_SECRET / SRC_WH_ID and the TGT_*
-# equivalents (see orchestrator/config.py::_load_env). Whether each side is
-# actually USED at runtime depends entirely on clone_type (set below):
-#   • AZ2AZ_TGT_* — ALWAYS required, for BOTH clone_type values. The target
-#     workspace hosts the control tables and runs all VALIDATE/DEEP_CLONE SQL,
-#     including reading the delta_share catalog when clone_type=delta_share.
-#   • AZ2AZ_SRC_* — ONLY required when clone_type=direct_adls (source SQL
-#     warehouse is queried via DESCRIBE DETAIL to resolve the abfss:// path).
-#     For clone_type=delta_share (this bundle's default — see clone_type
-#     below), the source workspace is never contacted at all: orchestrator_
-#     notebook.py skips src_sql.start_warehouse() entirely for delta_share
-#     (see the _needs_src_warehouse guard), and DEEP_CLONE/RETRY never touch
-#     src_sql/src_api regardless of clone_type. validate_config() in
-#     orchestrator/config.py only enforces these as non-blank when
-#     clone_type=direct_adls, so delta_share deployments are free to leave
-#     the secret VALUES blank/dummy — but the secret KEYS must still exist in
-#     the scope (Databricks resolves {{secrets/scope/key}} at cluster launch
-#     time and fails if the key is missing, even if unused downstream).
+# ── Authentication — NO external secrets ──────────────────────────────────────
+# This bundle does not define, reference, or require any Databricks Secret
+# scope, client_id, or client_secret anywhere (cluster configs or code).
+# orchestrator/sql_client.py (SqlClient) and orchestrator/api_client.py
+# (ApiClient) authenticate natively via the Databricks SDK's unified auth
+# (`databricks.sdk.core.Config()`), which auto-detects the run's own auth
+# context whenever this code executes inside a Databricks job/notebook —
+# exactly how every job in resources/*.yml runs. There is nothing to
+# provision, rotate, or store.
+#
+# The only workspace-connection values that still exist are the two
+# `target_warehouse_id` / `source_warehouse_id` variables below — plain,
+# non-secret SQL warehouse IDs (not credentials) so the SQL client knows
+# which warehouse to route statements to:
+#   • target_warehouse_id — ALWAYS required, for BOTH clone_type values. The
+#     target workspace hosts the control tables and runs all VALIDATE/
+#     DEEP_CLONE SQL, including reading the delta_share catalog when
+#     clone_type=delta_share.
+#   • source_warehouse_id — ONLY required when clone_type=direct_adls (the
+#     source SQL warehouse is queried via DESCRIBE DETAIL to resolve the
+#     abfss:// path). For clone_type=delta_share (this bundle's default —
+#     see clone_type below), the source workspace is never contacted at all:
+#     orchestrator_notebook.py skips src_sql.start_warehouse() entirely for
+#     delta_share (see the _needs_src_warehouse guard), and DEEP_CLONE/RETRY
+#     never touch src_sql/src_api regardless of clone_type. Leave it blank
+#     for delta_share deployments.
 #
 # configs/config.json (a legacy, unused config file from an earlier
 # pre-bundle architecture that duplicated source/target URL+SP+secret fields
@@ -112,6 +118,17 @@ variables:
   instance_pool_id:
     description: "Instance pool ID for orchestrator job_clusters (fast start for debugging/dev iteration)"
     default: "0908-093007-hoped4-pool-q4mi8hia"
+
+  # ── SQL warehouse IDs — plain, non-secret identifiers (NOT credentials) ──────
+  # No client_id/client_secret/Databricks Secret scope exists anywhere in this
+  # bundle. SqlClient/ApiClient authenticate natively via the Databricks SDK's
+  # Config() (see the "Authentication" comment block at the top of this file).
+  target_warehouse_id:
+    description: "SQL warehouse id (target workspace) for control-table SQL and delta_share queries. Always required."
+    default: "5fe1692f119e2528"    # Serverless Starter Warehouse
+  source_warehouse_id:
+    description: "[direct_adls only] SQL warehouse id (source workspace), used for DESCRIBE DETAIL. Leave blank for delta_share."
+    default: ""
 
   # ── Batch / Chunk execution parameters ────────────────────────────────────────
   batch_id:

@@ -24,6 +24,14 @@ resources:
           default: ${var.meta_schema}
         - name: selection_type
           default: catalog
+        # target_warehouse_id / source_warehouse_id: plain (non-secret) SQL
+        # warehouse identifiers — NOT credentials. No client_id/client_secret/
+        # secret-scope: SqlClient/ApiClient authenticate natively via
+        # databricks.sdk.core.Config().
+        - name: target_warehouse_id
+          default: ${var.target_warehouse_id}
+        - name: source_warehouse_id
+          default: ${var.source_warehouse_id}
 
       tasks:
         - task_key: dry_run
@@ -40,6 +48,8 @@ resources:
               clone_type: "{{job.parameters.clone_type}}"
               meta_catalog: "{{job.parameters.meta_catalog}}"
               meta_schema: "{{job.parameters.meta_schema}}"
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
+              source_warehouse_id: "{{job.parameters.source_warehouse_id}}"
           job_cluster_key: orchestrator_cluster
 
       job_clusters:
@@ -50,19 +60,7 @@ resources:
             num_workers: 2
             spark_conf:
               spark.databricks.delta.preview.enabled: "true"
-            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
-            # clone_type=delta_share (this bundle's default) they're unused placeholders
-            # (keys must still exist in the secret scope, values may be blank) — see the
-            # "Secrets" comment block at the top of databricks.yml for the full rationale.
             spark_env_vars:
-              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
-              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
-              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
-              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
-              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
-              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
-              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
-              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
               PYTHONPATH: "${workspace.file_path}"
 
       email_notifications:

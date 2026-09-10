@@ -7,6 +7,13 @@ resources:
         team: deepclone
         phase: setup
 
+      parameters:
+        # target_warehouse_id: plain (non-secret) SQL warehouse identifier —
+        # NOT a credential. No client_id/client_secret/secret-scope anywhere:
+        # SqlClient authenticates natively via databricks.sdk.core.Config().
+        - name: target_warehouse_id
+          default: ${var.target_warehouse_id}
+
       tasks:
         - task_key: setup_tables
           notebook_task:
@@ -15,6 +22,7 @@ resources:
               meta_catalog: ${var.meta_catalog}
               meta_schema: ${var.meta_schema}
               repo_root: ${workspace.file_path}
+              target_warehouse_id: "{{job.parameters.target_warehouse_id}}"
           job_cluster_key: default_cluster
 
       job_clusters:
@@ -25,19 +33,7 @@ resources:
             num_workers: 2
             spark_conf:
               spark.databricks.delta.preview.enabled: "true"
-            # AZ2AZ_SRC_* only functionally used when clone_type=direct_adls; for
-            # clone_type=delta_share (this bundle's default) they're unused placeholders
-            # (keys must still exist in the secret scope, values may be blank) — see the
-            # "Secrets" comment block at the top of databricks.yml for the full rationale.
             spark_env_vars:
-              AZ2AZ_SRC_URL: "{{secrets/deepclone-migration/src-url}}"
-              AZ2AZ_SRC_CID: "{{secrets/deepclone-migration/src-cid}}"
-              AZ2AZ_SRC_SECRET: "{{secrets/deepclone-migration/src-secret}}"
-              AZ2AZ_SRC_WH_ID: "{{secrets/deepclone-migration/src-wh-id}}"
-              AZ2AZ_TGT_URL: "{{secrets/deepclone-migration/tgt-url}}"
-              AZ2AZ_TGT_CID: "{{secrets/deepclone-migration/tgt-cid}}"
-              AZ2AZ_TGT_SECRET: "{{secrets/deepclone-migration/tgt-secret}}"
-              AZ2AZ_TGT_WH_ID: "{{secrets/deepclone-migration/tgt-wh-id}}"
               PYTHONPATH: "${workspace.file_path}"
 
       email_notifications:

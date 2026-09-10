@@ -1,64 +1,32 @@
 """
 sql_client.py — SQL Statement Execution API client.
 
+Authentication
+--------------
+Uses the Databricks SDK's native/unified authentication (`databricks.sdk.core.Config`)
+instead of a hand-rolled OAuth client_id/client_secret flow. When this code runs
+inside a Databricks job/notebook (the only place it ever runs in production),
+`Config()` automatically picks up the run's own native auth context — there is
+NO client_id, client_secret, or Databricks Secret scope to provision or manage.
+`workspace_url` is optional (blank = current/attached workspace, auto-detected).
+
 Features
 --------
-• Transparent OAuth 2.0 M2M token acquisition and refresh (Databricks OIDC).
 • Polls statement until SUCCEEDED / FAILED with configurable timeout.
 • Returns typed rows as List[Dict[str, Any]].
-• Separate source and target clients with independent token caches.
+• Separate source and target clients, each with their own Config/auth context.
 • Rate-limit awareness (backs off on 429).
 """
 
 from __future__ import annotations
 import time
-import threading
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from databricks.sdk.core import Config
 
 log = logging.getLogger(__name__)
-
-
-class TokenCache:
-    """Thread-safe cached OAuth token with early expiry."""
-
-    _REFRESH_MARGIN_S = 120  # refresh 2 minutes before expiry
-
-    def __init__(self, workspace_url: str, client_id: str, client_secret: str):
-        self._url    = workspace_url.rstrip("/")
-        self._cid    = client_id
-        self._secret = client_secret
-        self._token: Optional[str] = None
-        self._expires_at: float    = 0.0
-        self._lock = threading.Lock()
-
-    def get(self) -> str:
-        with self._lock:
-            if time.time() < self._expires_at - self._REFRESH_MARGIN_S and self._token:
-                return self._token
-            self._token, ttl = self._fetch()
-            self._expires_at = time.time() + ttl
-            return self._token
-
-    def _fetch(self) -> Tuple[str, int]:
-        resp = requests.post(
-            f"{self._url}/oidc/v1/token",
-            data={
-                "grant_type":    "client_credentials",
-                "client_id":     self._cid,
-                "client_secret": self._secret,
-                "scope":         "all-apis",
-            },
-            timeout=20,
-        )
-        if not resp.ok:
-            raise RuntimeError(
-                f"{resp.status_code} POST /oidc/v1/token: {resp.text[:2000]}"
-            )
-        d = resp.json()
-        return d["access_token"], d.get("expires_in", 3600)
 
 
 class SqlClient:
@@ -67,7 +35,8 @@ class SqlClient:
 
     Usage
     -----
-    client = SqlClient(workspace_url, client_id, client_secret, warehouse_id)
+    client = SqlClient(warehouse_id=warehouse_id)                 # current workspace (default)
+    client = SqlClient(workspace_url=url, warehouse_id=wh_id)     # explicit workspace override
     rows   = client.execute("SELECT * FROM t WHERE status = 'PENDING'")
     client.execute_ddl("CREATE SCHEMA IF NOT EXISTS cat.sch")
     """
@@ -77,16 +46,20 @@ class SqlClient:
 
     def __init__(
         self,
-        workspace_url:  str,
-        client_id:      str,
-        client_secret:  str,
         warehouse_id:   str,
+        workspace_url:  str = "",
         throttle_s:     float = 0.2,
     ):
-        self._url        = workspace_url.rstrip("/")
-        self._wh         = warehouse_id
-        self._throttle   = throttle_s
-        self._tokens     = TokenCache(workspace_url, client_id, client_secret)
+        # Config() with no host auto-detects the current Databricks workspace
+        # (via the notebook/job's own runtime auth) and requires zero secrets.
+        # Passing an explicit workspace_url is only meaningful when combined
+        # with a standard Databricks SDK auth env var / CLI profile set
+        # externally by the caller (DATABRICKS_HOST/TOKEN/CLIENT_ID/... —
+        # none of which this codebase provisions or stores itself).
+        self._cfg  = Config(host=workspace_url) if workspace_url else Config()
+        self._url  = self._cfg.host.rstrip("/")
+        self._wh   = warehouse_id
+        self._throttle = throttle_s
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -135,10 +108,9 @@ class SqlClient:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._tokens.get()}",
-            "Content-Type":  "application/json",
-        }
+        headers = self._cfg.authenticate()
+        headers["Content-Type"] = "application/json"
+        return headers
 
     def _submit(self, sql: str) -> Tuple[str, Dict]:
         for attempt in range(3):
@@ -241,17 +213,16 @@ class SqlClient:
 
     def start_warehouse(self) -> None:
         """Start the warehouse if not already RUNNING."""
-        tok = self._tokens.get()
         requests.post(
             f"{self._url}/api/2.0/sql/warehouses/{self._wh}/start",
-            headers={"Authorization": f"Bearer {tok}"},
+            headers=self._headers(),
             timeout=30,
         )
         log.info("Warehouse %s start requested", self._wh)
         for _ in range(30):
             r = requests.get(
                 f"{self._url}/api/2.0/sql/warehouses/{self._wh}",
-                headers={"Authorization": f"Bearer {self._tokens.get()}"},
+                headers=self._headers(),
                 timeout=20,
             ).json()
             if r.get("state") == "RUNNING":

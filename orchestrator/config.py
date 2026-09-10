@@ -7,8 +7,13 @@ Precedence (highest → lowest):
   3. CSV table mapping (extends/overrides selection only)
   4. Framework defaults (this file)
 
-Secrets must NEVER appear in YAML or the control table.
-Load them from environment variables or Databricks Secrets.
+Authentication: this framework does NOT store or reference any client_id /
+client_secret / Databricks Secret scope. `orchestrator/sql_client.py` and
+`orchestrator/api_client.py` authenticate via the Databricks SDK's native
+runtime auth (`databricks.sdk.core.Config()`), which is automatic when the
+code runs inside a Databricks job/notebook. The fields below
+(workspace_url / warehouse_id) are plain, non-sensitive identifiers — not
+secrets — and may be left blank to auto-detect the current workspace.
 """
 
 from __future__ import annotations
@@ -46,15 +51,15 @@ class ClusterConfig:
 
 @dataclass
 class OrchestratorConfig:
-    # ── Workspace credentials (from env vars / Databricks Secrets) ──
-    source_workspace_url:    str = ""
-    source_client_id:        str = ""
-    source_client_secret:    str = ""     # from env
+    # ── Workspace connection info (plain, non-secret identifiers) ──
+    # No client_id/client_secret here by design — SqlClient/ApiClient
+    # authenticate natively via databricks.sdk.core.Config() (no external
+    # secrets). workspace_url blank = auto-detect the current/attached
+    # workspace at runtime.
+    source_workspace_url:    str = ""     # [direct_adls only] leave blank to auto-detect
     source_warehouse_id:     str = ""     # required for DIRECT_ADLS inventory
 
-    target_workspace_url:    str = ""
-    target_client_id:        str = ""
-    target_client_secret:    str = ""     # from env
+    target_workspace_url:    str = ""     # leave blank to auto-detect (current workspace)
     target_warehouse_id:     str = ""     # for control-table reads/writes
 
     # ── Control table location (on target workspace) ──
@@ -148,20 +153,23 @@ class OrchestratorConfig:
 # ── Loaders ───────────────────────────────────────────────────────────────────
 
 def _load_env(config: OrchestratorConfig) -> None:
-    """Populate secrets from environment variables (never from files)."""
+    """
+    Populate plain (non-secret) workspace connection overrides from
+    environment variables, for standalone/local runs only. Inside a
+    Databricks job these are normally supplied via job parameters/widgets
+    instead (see orchestrator_notebook.py's target_warehouse_id /
+    source_warehouse_id widgets) — no client_id/client_secret exist here,
+    auth is handled natively by databricks.sdk.core.Config().
+    """
     config.source_workspace_url   = os.environ.get("AZ2AZ_SRC_URL", config.source_workspace_url)
-    config.source_client_id       = os.environ.get("AZ2AZ_SRC_CID", config.source_client_id)
-    config.source_client_secret   = os.environ.get("AZ2AZ_SRC_SECRET", config.source_client_secret)
     config.source_warehouse_id    = os.environ.get("AZ2AZ_SRC_WH_ID", config.source_warehouse_id)
 
     config.target_workspace_url   = os.environ.get("AZ2AZ_TGT_URL", config.target_workspace_url)
-    config.target_client_id       = os.environ.get("AZ2AZ_TGT_CID", config.target_client_id)
-    config.target_client_secret   = os.environ.get("AZ2AZ_TGT_SECRET", config.target_client_secret)
     config.target_warehouse_id    = os.environ.get("AZ2AZ_TGT_WH_ID", config.target_warehouse_id)
 
 
 def load_from_yaml(path: str) -> OrchestratorConfig:
-    """Load configuration from a YAML file, then overlay env-var secrets."""
+    """Load configuration from a YAML file, then overlay env-var overrides (non-secret)."""
     import yaml  # lazy import — only needed when YAML input_type is used
     with open(path) as f:
         raw: Dict[str, Any] = yaml.safe_load(f) or {}
@@ -174,11 +182,9 @@ def load_from_yaml(path: str) -> OrchestratorConfig:
 
     src = raw.get("source", {})
     cfg.source_workspace_url = src.get("workspace_url", cfg.source_workspace_url)
-    cfg.source_client_id     = src.get("client_id", cfg.source_client_id)
 
     tgt = raw.get("target", {})
     cfg.target_workspace_url = tgt.get("workspace_url", cfg.target_workspace_url)
-    cfg.target_client_id     = tgt.get("client_id", cfg.target_client_id)
     cfg.target_warehouse_id  = tgt.get("warehouse_id", cfg.target_warehouse_id)
     cfg.default_target_catalog = tgt.get("catalog", cfg.default_target_catalog)
 
@@ -244,7 +250,7 @@ def load_from_yaml(path: str) -> OrchestratorConfig:
 
 
 def load_defaults() -> OrchestratorConfig:
-    """Return a default config with secrets from env vars."""
+    """Return a default config with plain (non-secret) overrides from env vars."""
     cfg = OrchestratorConfig()
     _load_env(cfg)
     return cfg
@@ -257,24 +263,20 @@ def validate_config(cfg: OrchestratorConfig, mode: str) -> List[str]:
     is NEVER contacted directly — tables are read via the shared catalog that
     already lives on the TARGET workspace (see orchestrator_notebook.py's
     _disc_sql/_val_src_sql routing and the conditional src_sql.start_warehouse()
-    guard). So source_workspace_url/source_client_id/source_client_secret/
-    source_warehouse_id are ONLY required when clone_type=direct_adls, where
-    the source SQL warehouse must be queried (DESCRIBE DETAIL) to resolve the
-    underlying abfss:// path. Requiring them unconditionally used to force
-    every delta_share deployment to configure unused source SP credentials.
+    guard). So source_warehouse_id is ONLY required when clone_type=direct_adls,
+    where the source SQL warehouse must be queried (DESCRIBE DETAIL) to
+    resolve the underlying abfss:// path.
+
+    NOTE on auth: there are no client_id/client_secret fields to validate —
+    SqlClient/ApiClient authenticate natively via databricks.sdk.core.Config()
+    (no external secrets). workspace_url fields are optional everywhere
+    (blank = auto-detect the current/attached workspace); only the SQL
+    warehouse *id* (a plain, non-secret identifier) is actually required, so
+    the client knows which warehouse to route statements to.
     """
     errors = []
-    if cfg.clone_type == "direct_adls":
-        if not cfg.source_workspace_url:
-            errors.append("source_workspace_url is required for direct_adls clone type")
-        if not cfg.source_client_id or not cfg.source_client_secret:
-            errors.append("Source SP credentials (CID + SECRET) are required for direct_adls clone type")
-        if not cfg.source_warehouse_id:
-            errors.append("source_warehouse_id is required for direct_adls clone type")
-    if not cfg.target_workspace_url:
-        errors.append("target_workspace_url is required")
-    if not cfg.target_client_id or not cfg.target_client_secret:
-        errors.append("Target SP credentials (CID + SECRET) are required")
+    if cfg.clone_type == "direct_adls" and not cfg.source_warehouse_id:
+        errors.append("source_warehouse_id is required for direct_adls clone type")
     if not cfg.target_warehouse_id:
         errors.append("target_warehouse_id is required for control-table access")
     if mode == "DEEP_CLONE" and not cfg.cluster_pool and not cfg.worker_cluster_config:
