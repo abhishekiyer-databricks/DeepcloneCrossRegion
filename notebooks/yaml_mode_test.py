@@ -234,6 +234,9 @@ WORKER_CLUSTER_JSON = json.dumps({
     "spark_version": "15.4.x-scala2.12",
     "node_type_id": "Standard_D4s_v3",
     "num_workers": 2,
+    # REQUIRED for Unity Catalog access — without this, some workspaces
+    # default new_cluster to a non-UC mode and fail on any UC table access.
+    "data_security_mode": "DATA_SECURITY_MODE_AUTO",
     "spark_conf": {"spark.databricks.delta.preview.enabled": "true"},
     "azure_attributes": {"first_on_demand": 1, "availability": "ON_DEMAND_AZURE"},
 })

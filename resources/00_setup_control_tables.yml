@@ -31,6 +31,13 @@ resources:
             spark_version: ${var.worker_spark_version}
             instance_pool_id: ${var.instance_pool_id}
             num_workers: 2
+            # REQUIRED for Unity Catalog access — without this, some
+            # workspaces default new_cluster to a non-UC "No Isolation
+            # Shared" mode, which fails with "cluster is not attached to
+            # Unity Catalog" the moment the notebook touches a UC table.
+            # AUTO lets Databricks pick the best UC-compatible mode for the
+            # workspace/policy (no single_user_name needed).
+            data_security_mode: DATA_SECURITY_MODE_AUTO
             spark_conf:
               spark.databricks.delta.preview.enabled: "true"
             spark_env_vars:

@@ -84,6 +84,7 @@ resources:
                   "spark_version": "${var.worker_spark_version}",
                   "instance_pool_id": "${var.instance_pool_id}",
                   "num_workers": 2,
+                  "data_security_mode": "DATA_SECURITY_MODE_AUTO",
                   "spark_conf": {"spark.databricks.delta.preview.enabled": "true"}
                 }
           job_cluster_key: orchestrator_cluster
@@ -94,6 +95,9 @@ resources:
             spark_version: ${var.worker_spark_version}
             instance_pool_id: ${var.instance_pool_id}
             num_workers: 2
+            # REQUIRED for Unity Catalog access — see 00_setup_control_tables.yml
+            # for the full rationale (avoids non-UC "No Isolation Shared" default).
+            data_security_mode: DATA_SECURITY_MODE_AUTO
             spark_conf:
               spark.databricks.delta.preview.enabled: "true"
             spark_env_vars:

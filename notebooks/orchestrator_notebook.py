@@ -322,6 +322,16 @@ if _cluster_pool and _cluster_pool.strip() not in ("[]", ""):
 if _worker_cluster and _worker_cluster.strip() not in ("", "{}"):
     import json as _json2
     cfg.worker_cluster_config = _json2.loads(_worker_cluster)
+    # Defensive default: without an explicit data_security_mode, some
+    # workspaces create these ephemeral chunk clusters in a non-UC
+    # ("No Isolation Shared" / NONE) mode, which then fails the moment the
+    # chunk worker touches a Unity Catalog table/catalog. This safety net
+    # patches any client-supplied worker_cluster_json that omits the field —
+    # AUTO picks the best UC-compatible mode for the workspace/policy without
+    # needing a single_user_name.
+    if "data_security_mode" not in cfg.worker_cluster_config:
+        cfg.worker_cluster_config["data_security_mode"] = "DATA_SECURITY_MODE_AUTO"
+        log.info("worker_cluster_json had no data_security_mode — defaulted to DATA_SECURITY_MODE_AUTO for Unity Catalog compatibility")
     log.info("Worker cluster config loaded (%d keys)", len(cfg.worker_cluster_config))
 
 # Worker/chunk-worker notebook path — MUST match the actual deployed workspace
