@@ -11,6 +11,55 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > heading (most recent first), with the date and the files touched. Keep entries
 > concise and factual.
 
+## [1.10.0] - 2026-10-26
+
+### Changed
+- **Predictive Optimization (PO) gate now evaluates the TARGET table, not the
+  source.** The gate blocks a migration when PO is ENABLED on the **destination**
+  (`target_catalog.target_schema.target_table`) — the table the clone writes
+  into / re-syncs against — instead of the source. The PO flag is always read on
+  the **target workspace** (`tgt_api`) regardless of `clone_type`. If the target
+  table does not exist yet (fresh migration / `require_target_precreated=false`),
+  the checker falls back to the target **schema**, then **catalog**, whose
+  effective PO flag is exactly what the freshly-cloned table will inherit. Only a
+  404 descends to the parent; a permission/transport error or an existing object
+  with no resolvable flag still fails closed (`PREDICTIVE_OPTIMIZATION_UNKNOWN`).
+  - `orchestrator/predictive_optimization.py`: `check(target_catalog, target_schema,
+    target_table)`; new `_resolve_effective_flag()` (table→schema→catalog walk) and
+    `_is_not_found()`; `check_selections()` now passes target identity; docstrings/rationale updated.
+  - `orchestrator/inventory_manager.py`: PO gate calls `check(sel.target_*)`.
+  - `notebooks/orchestrator_notebook.py`: `PredictiveOptimizationChecker(tgt_api)` (was `_disc_api`);
+    INVENTORY/DRY_RUN block messages reworded source→target.
+  - `tests/test_predictive_optimization.py`: rekeyed to target identity; **+3** tests for the
+    target-missing table→schema→catalog fallback (13 total, all passing).
+  - Validated live on vk-west (parallel inventory runs): target PO ENABLED → `PO_BLOCKED`/run
+    FAILED; target PO DISABLED → `QUEUED`/run SUCCESS — both with the **source** PO ENABLED,
+    confirming the source is no longer consulted. Test CSVs: `configs/csv_po_tgt_run1_blocked.csv`,
+    `configs/csv_po_tgt_run2_pass.csv`.
+
+### Fixed
+- **End-of-run metrics summary no longer fails an otherwise-successful run on a
+  slow warehouse.** `AuditManager.get_run_metrics()` (the Section-6 `GROUP BY`
+  aggregation over `migration_control`) used the default 300s `SqlClient` timeout
+  and raised `TimeoutError` at client scale / on a cold warehouse, killing a run
+  whose migration work had already committed. It now (a) uses a configurable,
+  generous timeout and (b) degrades to zeroed metrics with a `[WARN]` instead of
+  raising — the cosmetic summary can never fail the migration.
+  - `orchestrator/config.py`: new `metrics_query_timeout_s` (default 1800s) + YAML loader mapping.
+  - `orchestrator/audit_manager.py`: `get_run_metrics()` try/except fail-soft + explicit timeout.
+  - `configs/migration.yaml`: documents `execution.metrics_query_timeout_s`.
+
+### Added
+- **Discovery-identity diagnostics.** The INVENTORY step now logs/prints the
+  principal (`current_user()`) the discovery workspace evaluates catalog/schema
+  visibility and permissions against, and annotates UC enumeration failures
+  (`SCHEMA_DOES_NOT_EXIST` / `SHOW TABLES`/`SHOW SCHEMAS` errors) with
+  `discovery run_as=<identity>` — so a 404 caused by a run-as identity lacking
+  `USE CATALOG`/`USE SCHEMA` is immediately obvious (UC masks unauthorized
+  objects as "does not exist").
+  - `notebooks/orchestrator_notebook.py`: one-time discovery identity banner.
+  - `orchestrator/input_resolver.py`: cached `_run_as()`; failure logs include the identity.
+
 ## [1.9.0] - 2026-10-21
 
 ### Added

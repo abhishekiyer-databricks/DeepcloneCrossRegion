@@ -189,14 +189,14 @@ class InventoryManager:
             try:
                 # ── Predictive Optimization gate (parallel, runs FIRST) ──────
                 # Reuses this same per-table worker thread (no extra sequential
-                # pass). A source table whose effective PO is ENABLED — or whose
+                # pass). A TARGET table whose effective PO is ENABLED — or whose
                 # PO status can't be confirmed disabled — short-circuits here:
                 # we skip the (now-pointless) DESCRIBE DETAIL and return the
                 # POState so the aggregation records it as PO_BLOCKED and fails
                 # the step. Clean tables fall through to normal onboarding.
                 if self._po is not None:
                     po = self._po.check(
-                        sel.source_catalog, sel.source_schema, sel.source_table
+                        sel.target_catalog, sel.target_schema, sel.target_table
                     )
                     if po.blocked:
                         return sel, None, False, None, po

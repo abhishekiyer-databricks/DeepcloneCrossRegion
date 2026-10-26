@@ -71,9 +71,11 @@ class FakeApi:
     """Stand-in for ApiClient.unity_catalog_get keyed by table full name."""
 
     def __init__(self, responses: Optional[Dict[str, dict]] = None,
-                 errors: Optional[set] = None):
+                 errors: Optional[set] = None,
+                 not_found: Optional[set] = None):
         self.responses = responses or {}
         self.errors = errors or set()
+        self.not_found = not_found or set()   # names that raise a 404-style error
         self.calls: List[str] = []
         self._lock = threading.Lock()
 
@@ -82,6 +84,8 @@ class FakeApi:
             self.calls.append(full_name)
         if full_name in self.errors:
             raise RuntimeError("PERMISSION_DENIED reading PO")
+        if full_name in self.not_found:
+            raise RuntimeError(f"SCHEMA_DOES_NOT_EXIST: '{full_name}' does not exist")
         return self.responses.get(full_name, {})
 
 
@@ -177,13 +181,49 @@ def test_api_error_fails_closed():
     assert st.error_code == PO_UNKNOWN_CODE
 
 
+def test_target_table_missing_falls_back_to_schema():
+    # Destination table not created yet → table GET 404s → fall back to the
+    # target SCHEMA's effective flag (what the cloned table would inherit).
+    api = FakeApi(
+        responses={"tgt_cat.tgt_sch": eff("ENABLE", "SCHEMA", "tgt_sch")},
+        not_found={"tgt_cat.tgt_sch.t1"},
+    )
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is True
+    assert st.value == "ENABLE"
+    assert api.calls == ["tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch"]  # table → schema
+
+
+def test_target_table_and_schema_missing_falls_back_to_catalog():
+    # Table + schema absent → fall back to the target CATALOG; DISABLE there
+    # means the cloned table inherits DISABLE → allowed.
+    api = FakeApi(
+        responses={"tgt_cat": eff("DISABLE")},
+        not_found={"tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch"},
+    )
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is False
+    assert st.value == "DISABLE"
+    assert api.calls == ["tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch", "tgt_cat"]
+
+
+def test_target_fully_missing_fails_closed():
+    # Nothing in the target securable tree exists → cannot confirm → blocked.
+    api = FakeApi(not_found={"tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch", "tgt_cat"})
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is True
+    assert st.error_code == PO_UNKNOWN_CODE
+
+
 # ── 2. Parallel check_selections ───────────────────────────────────────────────
 
 def test_check_selections_parallel_map():
+    # The gate evaluates the TARGET table's PO flag (tgt_cat.tgt_sch.*); the
+    # result map is still keyed by source_fqn for reporting.
     api = FakeApi({
-        "src_cat.src_sch.a": eff("DISABLE"),
-        "src_cat.src_sch.b": eff("ENABLE", "SCHEMA", "src_sch"),
-        "src_cat.src_sch.c": eff("DISABLE"),
+        "tgt_cat.tgt_sch.a": eff("DISABLE"),
+        "tgt_cat.tgt_sch.b": eff("ENABLE", "SCHEMA", "tgt_sch"),
+        "tgt_cat.tgt_sch.c": eff("DISABLE"),
     })
     sels = [make_selection("a"), make_selection("b"), make_selection("c")]
     out = check_selections(PredictiveOptimizationChecker(api), sels, threads=3)
@@ -210,8 +250,8 @@ def _make_cfg() -> OrchestratorConfig:
 def test_inventory_blocks_po_enabled_and_queues_clean():
     cfg = _make_cfg()
     api = FakeApi({
-        "src_cat.src_sch.clean": eff("DISABLE"),
-        "src_cat.src_sch.blocked": eff("ENABLE", "CATALOG", "src_cat"),
+        "tgt_cat.tgt_sch.clean": eff("DISABLE"),
+        "tgt_cat.tgt_sch.blocked": eff("ENABLE", "CATALOG", "tgt_cat"),
     })
     src = FakeSqlClient()
     tgt = FakeSqlClient()
@@ -238,8 +278,8 @@ def test_inventory_blocks_po_enabled_and_queues_clean():
 def test_inventory_all_blocked_queues_nothing():
     cfg = _make_cfg()
     api = FakeApi({
-        "src_cat.src_sch.a": eff("ENABLE"),
-        "src_cat.src_sch.b": eff("ENABLE", "SCHEMA", "src_sch"),
+        "tgt_cat.tgt_sch.a": eff("ENABLE"),
+        "tgt_cat.tgt_sch.b": eff("ENABLE", "SCHEMA", "tgt_sch"),
     })
     src = FakeSqlClient()
     tgt = FakeSqlClient()

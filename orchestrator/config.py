@@ -174,6 +174,13 @@ class OrchestratorConfig:
     poll_interval_s:           int  = 30
     worker_timeout_minutes:    int  = 10080    # 7 days — per-chunk cluster-job timeout (see migration.yaml)
     api_throttle_delay_s:      float = 0.2
+    # Timeout (seconds) for the end-of-run metrics aggregation query
+    # (AuditManager.get_run_metrics — a GROUP BY scan of migration_control).
+    # At large scale (or on a cold/busy warehouse) the default SqlClient 300s
+    # cap can be exceeded; this raises it. The metrics summary is cosmetic and
+    # fails SOFT regardless (see get_run_metrics), so a slow warehouse never
+    # fails an otherwise-successful run.
+    metrics_query_timeout_s:   int  = 1800     # 30 min
 
     # ── Exclusion ──
     exclude_catalogs:  List[str] = field(default_factory=list)                   # catalog names (exact, lower-case)
@@ -247,6 +254,7 @@ def load_from_yaml(path: str) -> OrchestratorConfig:
     cfg.row_count_validation    = exec_.get("row_count_validation",    cfg.row_count_validation)
     cfg.stale_threshold_minutes = exec_.get("stale_threshold_minutes", cfg.stale_threshold_minutes)
     cfg.worker_timeout_minutes  = exec_.get("worker_timeout_minutes",  cfg.worker_timeout_minutes)
+    cfg.metrics_query_timeout_s = exec_.get("metrics_query_timeout_s", cfg.metrics_query_timeout_s)
     cfg.worker_notebook_path    = exec_.get("worker_notebook_path",    cfg.worker_notebook_path)
     cfg.exclude_schemas         = exec_.get("exclude_schemas",         cfg.exclude_schemas)
     cfg.exclude_patterns        = exec_.get("exclude_patterns",        cfg.exclude_patterns)

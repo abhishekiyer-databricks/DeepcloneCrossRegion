@@ -619,8 +619,30 @@ if MODE in ("INVENTORY", "DRY_RUN"):
     # For direct_adls, source tables are on the SOURCE workspace (cross-region).
     _disc_api = tgt_api if cfg.clone_type == "delta_share" else src_api
     _disc_sql = tgt_sql if cfg.clone_type == "delta_share" else src_sql
-    log.info("Table discovery client: %s workspace (%s mode)",
-             "TARGET" if cfg.clone_type == "delta_share" else "SOURCE", cfg.clone_type)
+    _disc_ws  = "TARGET" if cfg.clone_type == "delta_share" else "SOURCE"
+    log.info("Table discovery client: %s workspace (%s mode)", _disc_ws, cfg.clone_type)
+
+    # Identity banner: print WHICH principal UC will evaluate permissions /
+    # catalog-schema visibility against on the discovery workspace. This is the
+    # identity to grant USE CATALOG / USE SCHEMA / SELECT on (and the one a
+    # SCHEMA_DOES_NOT_EXIST / PERMISSION_DENIED during discovery points at).
+    # current_user() returns a user's email or a service principal's application
+    # id. Guarded so a failure here never blocks the run.
+    try:
+        _who = _disc_sql.execute(
+            "SELECT current_user() AS run_as_user, current_metastore() AS metastore"
+        )
+        if _who:
+            log.info(
+                "Discovery identity on %s workspace: run_as=%s | metastore=%s",
+                _disc_ws, _who[0].get("run_as_user"), _who[0].get("metastore"),
+            )
+            print(
+                f"  Discovery runs on {_disc_ws} workspace as: "
+                f"{_who[0].get('run_as_user')}  (metastore={_who[0].get('metastore')})"
+            )
+    except Exception as _e:
+        log.warning("Could not resolve discovery identity (current_user()): %s", _e)
 
     # Pass disc_sql as fallback for hive_metastore / non-UC catalogs
     src_resolver = InputResolver(cfg, _disc_api, source_sql=_disc_sql)
@@ -647,12 +669,15 @@ if MODE in ("INVENTORY", "DRY_RUN"):
         print(f"{'─'*68}\n")
 
     # ── Predictive Optimization gate (applies to INVENTORY and DRY_RUN) ──────
-    # Resolve effective PO on every selected SOURCE table via the UC REST API on
-    # the discovery workspace. Any source with PO ENABLED (or whose status can't
-    # be confirmed disabled) blocks the run. For INVENTORY the per-table check is
-    # done inside InventoryManager's parallel worker; DRY_RUN has no such loop,
-    # so it runs the standalone parallel check here and fails loudly if blocked.
-    po_checker = PredictiveOptimizationChecker(_disc_api)
+    # Resolve effective PO on every selected TARGET table via the UC REST API on
+    # the TARGET workspace (tgt_api) — the PO flag that matters is the one the
+    # cloned destination table has / will inherit, and it always lives on the
+    # target workspace regardless of clone_type. Any target with PO ENABLED (or
+    # whose status can't be confirmed disabled) blocks the run. For INVENTORY the
+    # per-table check is done inside InventoryManager's parallel worker; DRY_RUN
+    # has no such loop, so it runs the standalone parallel check here and fails
+    # loudly if blocked.
+    po_checker = PredictiveOptimizationChecker(tgt_api)
 
     if MODE == "DRY_RUN":
         print(f"\n{'─'*68}")
@@ -686,12 +711,12 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             print(f"  {cls:<8}: {cnt} table(s)")
         print(f"{'─'*68}\n")
 
-        # Fail the DRY_RUN loudly if any source has Predictive Optimization on.
+        # Fail the DRY_RUN loudly if any TARGET has Predictive Optimization on.
         if po_blocked:
             raise RuntimeError(
                 f"DRY_RUN blocked: Predictive Optimization is ENABLED (or "
-                f"unconfirmable) on {len(po_blocked)} source table(s). Disable PO "
-                f"at the catalog/schema/table level before migrating. First few: "
+                f"unconfirmable) on {len(po_blocked)} target table(s). Disable PO "
+                f"at the target catalog/schema/table level before migrating. First few: "
                 + "; ".join(f"{fqn} ({st.error_code})" for fqn, st in po_blocked[:10])
             )
 
@@ -731,9 +756,9 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             )
         if stats.get("po_blocked"):
             print(
-                f"  ✗ PREDICTIVE OPTIMIZATION GATE — {stats['po_blocked']} source "
+                f"  ✗ PREDICTIVE OPTIMIZATION GATE — {stats['po_blocked']} target "
                 f"table(s) have PO ENABLED (or unconfirmable) and were recorded as "
-                f"PO_BLOCKED (not queued). Disable PO at source, then re-run "
+                f"PO_BLOCKED (not queued). Disable PO on the target, then re-run "
                 f"INVENTORY with force_reonboard=true to queue them."
             )
             for _sel, _po in stats["po_blocked_list"][:20]:
@@ -787,13 +812,13 @@ if MODE in ("INVENTORY", "DRY_RUN"):
         # ── Predictive Optimization gate — fail the INVENTORY step ───────────
         # Clean tables were onboarded + planned above (per the "queue clean
         # tables as usual" decision); now fail loudly so the job turns red and
-        # the operator must disable PO at source before the migration proceeds.
+        # the operator must disable PO on the target before the migration proceeds.
         if stats.get("po_blocked"):
             raise RuntimeError(
                 f"INVENTORY blocked: Predictive Optimization is ENABLED (or "
-                f"unconfirmable) on {stats['po_blocked']} source table(s), recorded "
-                f"as PO_BLOCKED in migration_control. Disable PO at the "
-                f"catalog/schema/table level, then re-run INVENTORY with "
+                f"unconfirmable) on {stats['po_blocked']} target table(s), recorded "
+                f"as PO_BLOCKED in migration_control. Disable PO on the target "
+                f"catalog/schema/table, then re-run INVENTORY with "
                 f"force_reonboard=true. First few: "
                 + "; ".join(
                     f"{sel.source_fqn} ({po.error_code})"

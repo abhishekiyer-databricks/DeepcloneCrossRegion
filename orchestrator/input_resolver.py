@@ -35,6 +35,28 @@ class InputResolver:
         self._cfg = config
         self._api = source_api
         self._sql = source_sql   # optional SqlClient for SHOW TABLES fallback
+        self._run_as_cache = None   # lazily resolved current_user() of the discovery workspace
+
+    def _run_as(self) -> str:
+        """
+        Return the identity (user email / SP application-id) the discovery
+        workspace evaluates catalog/schema visibility + permissions against.
+        Resolved once via current_user() on the discovery SQL client and
+        cached. Used to annotate SCHEMA_DOES_NOT_EXIST / enumeration errors so
+        it's obvious WHICH principal to grant USE CATALOG/USE SCHEMA/SELECT on.
+        Fully guarded — never raises.
+        """
+        if self._run_as_cache is not None:
+            return self._run_as_cache
+        self._run_as_cache = "<unknown>"
+        if self._sql is not None:
+            try:
+                rows = self._sql.execute("SELECT current_user() AS u")
+                if rows:
+                    self._run_as_cache = str(rows[0].get("u") or "<unknown>")
+            except Exception:
+                pass
+        return self._run_as_cache
 
     # ── Main entry ────────────────────────────────────────────────────────────
 
@@ -491,7 +513,8 @@ class InputResolver:
                 rows = self._sql.execute(f"SHOW SCHEMAS IN `{src_cat}`")
                 schema_names = [r.get("databaseName") or r.get("namespace") or "" for r in rows]
             except Exception as e2:
-                log.error("SHOW SCHEMAS also failed for %s: %s", src_cat, e2)
+                log.error("SHOW SCHEMAS also failed for %s (discovery run_as=%s): %s",
+                          src_cat, self._run_as(), e2)
 
         for sch_name in schema_names:
             if sch_name.lower() in [x.lower() for x in self._cfg.exclude_schemas]:
@@ -525,7 +548,8 @@ class InputResolver:
                         table_names.append(tbl_name)
             log.info("UC API returned %d tables for %s.%s", len(table_names), src_cat, src_sch)
         except Exception as e:
-            log.warning("UC Tables API failed for %s.%s: %s — trying SHOW TABLES fallback", src_cat, src_sch, e)
+            log.warning("UC Tables API failed for %s.%s (discovery run_as=%s): %s — trying SHOW TABLES fallback",
+                        src_cat, src_sch, self._run_as(), e)
 
         # Fallback: SHOW TABLES via SQL warehouse (hive_metastore / permission issues)
         if not table_names and self._sql is not None:
@@ -540,7 +564,8 @@ class InputResolver:
                         table_names.append(tbl_name)
                 log.info("SHOW TABLES returned %d tables for %s.%s", len(table_names), src_cat, src_sch)
             except Exception as e2:
-                log.error("SHOW TABLES also failed for %s.%s: %s", src_cat, src_sch, e2)
+                log.error("SHOW TABLES also failed for %s.%s (discovery run_as=%s): %s",
+                          src_cat, src_sch, self._run_as(), e2)
 
         for tbl_name in table_names:
             selections.append(TableSelection(

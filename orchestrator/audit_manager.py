@@ -693,20 +693,41 @@ class AuditManager:
         select their work `WHERE batch_id = cfg.batch_id`), so scope the
         summary by that instead.
         """
-        rows = self._sql.execute(f"""
-            SELECT status, COUNT(*) AS n,
-                   SUM(size_in_bytes) AS total_bytes,
-                   SUM(duration_seconds) AS total_dur
-            FROM {self._ctrl}
-            WHERE batch_id = '{self._cfg.batch_id}'
-            GROUP BY status
-        """)
         metrics: Dict = {
             "total": 0, "queued": 0, "in_progress": 0, "assigned": 0,
             "completed": 0, "validated": 0, "failed": 0, "failed_permanent": 0,
             "validation_failed": 0, "retry_pending": 0, "skipped": 0,
             "total_bytes": 0, "total_duration_s": 0,
         }
+        # This is the END-OF-RUN cosmetic summary. It must NEVER fail an
+        # otherwise-successful migration: the real work (deep clone / validate /
+        # inventory) has already committed to migration_control by the time we
+        # get here. At client scale this GROUP BY scan of the control table can
+        # exceed the default 300s SqlClient cap on a cold/busy warehouse, so we
+        # (a) give it a generous, configurable timeout and (b) degrade to the
+        # zeroed baseline above (logging a warning) instead of raising if it
+        # still times out or errors. For INVENTORY mode the caller overrides
+        # these values from ground-truth _inventory_stats anyway.
+        metrics_timeout = getattr(self._cfg, "metrics_query_timeout_s", 1800)
+        try:
+            rows = self._sql.execute(
+                f"""
+                SELECT status, COUNT(*) AS n,
+                       SUM(size_in_bytes) AS total_bytes,
+                       SUM(duration_seconds) AS total_dur
+                FROM {self._ctrl}
+                WHERE batch_id = '{self._cfg.batch_id}'
+                GROUP BY status
+                """,
+                timeout_s=metrics_timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 — summary must never fail the run
+            print(
+                f"[WARN] get_run_metrics: final-summary aggregation failed "
+                f"({type(exc).__name__}: {exc}); reporting zeroed metrics. "
+                f"The migration itself is unaffected."
+            )
+            return metrics
         for r in rows:
             s = (r.get("status") or "").lower().replace("_", "")
             metrics["total"] += int(r["n"] or 0)

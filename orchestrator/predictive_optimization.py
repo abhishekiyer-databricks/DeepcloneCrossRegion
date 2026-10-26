@@ -4,13 +4,14 @@ predictive_optimization.py — INVENTORY-time Predictive Optimization (PO) gate.
 Why this exists
 ---------------
 Unity Catalog Predictive Optimization runs background OPTIMIZE / VACUUM on a
-table. If PO is enabled on a SOURCE table while it is being migrated, those
-background rewrites mutate the source's files/Delta versions mid-flight —
-exactly the class of churn that causes DEEP CLONE version drift and concurrent-
-write conflicts. The migration therefore requires PO to be DISABLED on every
-source table before onboarding. INVENTORY enforces this: any source table whose
-*effective* PO is ENABLED (or whose PO status cannot be confirmed disabled) is
-recorded with status=PO_BLOCKED and the INVENTORY step is failed.
+table. If PO is enabled on the TARGET (destination) table that a migration
+clones into, those background rewrites mutate the target's files/Delta versions
+underneath the clone — exactly the class of churn that causes DEEP CLONE version
+drift and concurrent-write conflicts (especially on incremental / repeat clone
+syncs into an existing target). The migration therefore requires PO to be
+DISABLED on every target table before onboarding. INVENTORY enforces this: any
+target whose *effective* PO is ENABLED (or whose PO status cannot be confirmed
+disabled) is recorded with status=PO_BLOCKED and the INVENTORY step is failed.
 
 Detection
 ---------
@@ -52,7 +53,7 @@ PO_UNKNOWN_CODE = "PREDICTIVE_OPTIMIZATION_UNKNOWN"
 
 @dataclass
 class POState:
-    """Resolved Predictive Optimization verdict for one source table."""
+    """Resolved Predictive Optimization verdict for one target table."""
     fqn:         str
     blocked:     bool                    # True ⇒ do NOT onboard; fail the step
     value:       Optional[str]           # "ENABLE" | "DISABLE" | None (unknown)
@@ -62,40 +63,87 @@ class POState:
     error_code:  str                     # "" when allowed; PO_*_CODE when blocked
 
 
+def _is_not_found(exc: Exception) -> bool:
+    """True if a UC GET failed purely because the object does not exist (404 /
+    *_DOES_NOT_EXIST / *_NOT_FOUND) — as opposed to a permission/transport error."""
+    if getattr(exc, "status_code", None) == 404:
+        return True
+    msg = str(exc).upper()
+    return ("DOES_NOT_EXIST" in msg) or ("NOT_FOUND" in msg) or ("RESOURCE_DOES_NOT_EXIST" in msg)
+
+
 class PredictiveOptimizationChecker:
     """
-    Resolves effective PO for source tables via the UC REST API.
+    Resolves effective PO for the TARGET (destination) table via the UC REST API.
 
-    `api_client` must be the DISCOVERY-workspace ApiClient (tgt_api for
-    delta_share, src_api for direct_adls) — i.e. the workspace where the SOURCE
-    tables being onboarded actually live.
+    `api_client` must be the TARGET-workspace ApiClient (tgt_api) — the PO flag
+    that matters is the one the cloned destination table has / will inherit,
+    and that lives on the target workspace regardless of clone_type.
+
+    The destination table may not exist yet at INVENTORY time (fresh migration,
+    or require_target_precreated=false). In that case the table-level GET 404s,
+    so we fall back to the target SCHEMA, then the target CATALOG, whose
+    effective_predictive_optimization_flag is exactly what the freshly-cloned
+    table would inherit. Only a 404 falls through to the parent; any other error
+    (permission/transport) or an existing object with no resolvable flag fails
+    closed (PREDICTIVE_OPTIMIZATION_UNKNOWN) — we never onboard a table whose PO
+    we cannot prove is disabled.
     """
 
     def __init__(self, api_client):
         self._api = api_client
 
-    def check(self, source_catalog: str, source_schema: str, source_table: str) -> POState:
-        fqn = f"{source_catalog}.{source_schema}.{source_table}"
+    def _resolve_effective_flag(self, catalog: str, schema: str, table: str):
+        """
+        Return (eff_flag_dict, scope_label). Walk target table → schema →
+        catalog, descending to the parent ONLY when the child does not exist.
+        Raises if nothing is resolvable or on a non-404 error.
+        """
+        attempts = [
+            ("tables",   f"{catalog}.{schema}.{table}", "target table"),
+            ("schemas",  f"{catalog}.{schema}",         "target schema (table not yet created)"),
+            ("catalogs", f"{catalog}",                  "target catalog (schema not yet created)"),
+        ]
+        last_not_found: Optional[Exception] = None
+        for kind, name, label in attempts:
+            try:
+                obj = self._api.unity_catalog_get(kind, name)
+            except Exception as e:
+                if _is_not_found(e):
+                    last_not_found = e
+                    continue      # object missing — try the parent securable
+                raise             # permission/transport error — fail closed
+            eff = obj.get("effective_predictive_optimization_flag") or {}
+            if eff:
+                return eff, label
+            # Object exists but exposes no effective flag → cannot confirm.
+            raise RuntimeError(
+                f"no effective_predictive_optimization_flag on {label} '{name}'"
+            )
+        # Every level 404'd — target securable tree does not exist.
+        raise last_not_found or RuntimeError("target securable not found")
+
+    def check(self, target_catalog: str, target_schema: str, target_table: str) -> POState:
+        fqn = f"{target_catalog}.{target_schema}.{target_table}"
         try:
-            obj = self._api.unity_catalog_get("tables", fqn)
+            eff, scope = self._resolve_effective_flag(target_catalog, target_schema, target_table)
         except Exception as e:  # fail closed — cannot confirm disabled
             return POState(
                 fqn=fqn, blocked=True, value=None, level=None, source_name=None,
-                reason=f"Could not read predictive optimization status: {str(e)[:300]}",
+                reason=f"Could not read predictive optimization status on target: {str(e)[:300]}",
                 error_code=PO_UNKNOWN_CODE,
             )
 
-        eff = obj.get("effective_predictive_optimization_flag") or {}
         value = eff.get("value")
 
         if value == "ENABLE":
             level = eff.get("inherited_from_type") or "TABLE"
             src   = eff.get("inherited_from_name")
-            where = f"{level} {src}".strip() if src else "set directly on the table"
+            where = f"{level} {src}".strip() if src else f"set directly ({scope})"
             return POState(
                 fqn=fqn, blocked=True, value="ENABLE", level=level, source_name=src,
-                reason=f"Predictive optimization is ENABLED ({where}) — disable it "
-                       f"before migrating this source table.",
+                reason=f"Predictive optimization is ENABLED on the target ({where}) — "
+                       f"disable it before migrating into this target table.",
                 error_code=PO_ENABLED_CODE,
             )
 
@@ -108,7 +156,7 @@ class PredictiveOptimizationChecker:
         # Unrecognised / missing effective flag → fail closed.
         return POState(
             fqn=fqn, blocked=True, value=value, level=None, source_name=None,
-            reason=f"Could not confirm predictive optimization is disabled "
+            reason=f"Could not confirm predictive optimization is disabled on target "
                    f"(effective flag: {eff!r}).",
             error_code=PO_UNKNOWN_CODE,
         )
@@ -133,7 +181,7 @@ def check_selections(
 
     def _one(sel) -> Tuple[str, POState]:
         return sel.source_fqn, checker.check(
-            sel.source_catalog, sel.source_schema, sel.source_table
+            sel.target_catalog, sel.target_schema, sel.target_table
         )
 
     with ThreadPoolExecutor(max_workers=max(1, threads), thread_name_prefix="po") as ex:
