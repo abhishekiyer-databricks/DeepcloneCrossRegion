@@ -11,6 +11,38 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 > heading (most recent first), with the date and the files touched. Keep entries
 > concise and factual.
 
+## [1.11.0] - 2026-10-22
+
+### Changed
+- **Predictive Optimization (PO) gate is now fail-OPEN — only a confirmed
+  `ENABLE` on a managed target blocks.** Previously an unreadable or missing PO
+  status failed closed (`PREDICTIVE_OPTIMIZATION_UNKNOWN` → blocked), which
+  over-blocked delta-shared / external targets (which structurally cannot have
+  PO) and not-yet-created targets. Per operational requirement, an unconfirmable
+  PO status must never fail the migration.
+  - A non-managed resolved target table (`table_type` ∈ {EXTERNAL, FOREIGN,
+    shared, view, …}) → **skipped** (`PREDICTIVE_OPTIMIZATION_SKIPPED`), never
+    blocked — PO never runs on it.
+  - A target securable that does not exist yet (table, schema, and catalog all
+    404) → **skipped** (`PREDICTIVE_OPTIMIZATION_SKIPPED`).
+  - An unreadable PO status (permission/transport error) or a missing/
+    unrecognised effective flag → **continue** (`PREDICTIVE_OPTIMIZATION_UNKNOWN`,
+    logged as a WARN), no longer blocks.
+  - Only effective PO `ENABLE` on a managed target (directly or inherited from
+    its schema/catalog) → **blocked** (`PREDICTIVE_OPTIMIZATION_ENABLED`).
+  - `orchestrator/predictive_optimization.py`: new `PO_SKIPPED_CODE`; new
+    `_resolve_securable()` (returns the UC object so `check()` can inspect
+    `table_type`) replacing `_resolve_effective_flag()`; new `_NotFoundError`;
+    `check()` rewritten to the fail-open policy above; module docstring updated.
+  - `notebooks/orchestrator_notebook.py`: DRY_RUN and INVENTORY messages now show
+    `source → target` mapping (fixes the misleading "source names" display),
+    drop the "(or unconfirmable)" wording, and surface a non-blocking
+    "skipped/unknown" summary.
+  - `tests/test_predictive_optimization.py`: inverted the three former
+    fail-closed tests to the new allow/skip expectations; added
+    `test_external_target_is_skipped`, `test_foreign_shared_target_is_skipped`,
+    `test_managed_target_enabled_still_blocks` (16 tests, all passing).
+
 ## [1.10.0] - 2026-10-26
 
 ### Changed

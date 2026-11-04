@@ -29,12 +29,18 @@ Verified live (UC REST API 2.1):
   • table   ENABLE  → table effective ENABLE (set directly, no inherited_from)
   • all DISABLE/INHERIT → effective DISABLE
 
-Fail-closed
------------
-If the PO status cannot be read (API/permission error) or the effective flag is
-missing/unrecognised, the table is treated as BLOCKED (error_code
-PREDICTIVE_OPTIMIZATION_UNKNOWN) — we never onboard a table we can't prove has
-PO disabled.
+Block policy (fail-OPEN except for a confirmed ENABLE)
+------------------------------------------------------
+Only a target whose effective PO resolves to **ENABLE** (directly or inherited
+from its schema/catalog) is BLOCKED. Everything else continues:
+  • A non-managed target (EXTERNAL / FOREIGN / delta-shared / view) → SKIPPED
+    (PO_SKIPPED_CODE) — predictive optimization never runs on it.
+  • A target securable that does not exist yet → SKIPPED (PO_SKIPPED_CODE).
+  • An unreadable (permission/transport) or missing/unrecognised flag → treated
+    as UNKNOWN (PO_UNKNOWN_CODE) and the migration CONTINUES, logging a warning.
+This is an intentional operational requirement: an unconfirmable PO status must
+NOT fail the migration (earlier revisions failed closed here). A delta-shared
+external source/target, in particular, has no PO flag and must never block.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ log = logging.getLogger(__name__)
 # error_code values persisted to migration_control.error_code for PO_BLOCKED rows
 PO_ENABLED_CODE = "PREDICTIVE_OPTIMIZATION_ENABLED"
 PO_UNKNOWN_CODE = "PREDICTIVE_OPTIMIZATION_UNKNOWN"
+PO_SKIPPED_CODE = "PREDICTIVE_OPTIMIZATION_SKIPPED"   # PO not applicable (external/foreign/absent)
 
 
 @dataclass
@@ -61,6 +68,10 @@ class POState:
     source_name: Optional[str]           # name of the inheriting securable (if any)
     reason:      str                     # human-readable message
     error_code:  str                     # "" when allowed; PO_*_CODE when blocked
+
+
+class _NotFoundError(Exception):
+    """Raised internally when the target table, its schema, AND its catalog all 404."""
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -93,16 +104,17 @@ class PredictiveOptimizationChecker:
     def __init__(self, api_client):
         self._api = api_client
 
-    def _resolve_effective_flag(self, catalog: str, schema: str, table: str):
+    def _resolve_securable(self, catalog: str, schema: str, table: str):
         """
-        Return (eff_flag_dict, scope_label). Walk target table → schema →
-        catalog, descending to the parent ONLY when the child does not exist.
-        Raises if nothing is resolvable or on a non-404 error.
+        Return (uc_object, scope_label). Walk target table → schema → catalog,
+        descending to the parent ONLY when the child does not exist (404).
+        Raises `_NotFoundError` if every level 404s; re-raises any non-404
+        (permission/transport) error for the caller to handle.
         """
         attempts = [
-            ("tables",   f"{catalog}.{schema}.{table}", "target table"),
-            ("schemas",  f"{catalog}.{schema}",         "target schema (table not yet created)"),
-            ("catalogs", f"{catalog}",                  "target catalog (schema not yet created)"),
+            ("tables",   f"{catalog}.{schema}.{table}", "table"),
+            ("schemas",  f"{catalog}.{schema}",         "schema"),
+            ("catalogs", f"{catalog}",                  "catalog"),
         ]
         last_not_found: Optional[Exception] = None
         for kind, name, label in attempts:
@@ -112,28 +124,59 @@ class PredictiveOptimizationChecker:
                 if _is_not_found(e):
                     last_not_found = e
                     continue      # object missing — try the parent securable
-                raise             # permission/transport error — fail closed
-            eff = obj.get("effective_predictive_optimization_flag") or {}
-            if eff:
-                return eff, label
-            # Object exists but exposes no effective flag → cannot confirm.
-            raise RuntimeError(
-                f"no effective_predictive_optimization_flag on {label} '{name}'"
-            )
-        # Every level 404'd — target securable tree does not exist.
-        raise last_not_found or RuntimeError("target securable not found")
+                raise             # permission/transport error — handled by caller
+            return obj, label
+        raise _NotFoundError(str(last_not_found) if last_not_found else "target securable not found")
 
     def check(self, target_catalog: str, target_schema: str, target_table: str) -> POState:
+        """
+        Verdict policy (fail-OPEN except for a confirmed ENABLE):
+          • effective PO == ENABLE on a managed target (or inherited from its
+            schema/catalog)                    → BLOCKED (PO_ENABLED_CODE).
+          • effective PO == DISABLE             → allowed.
+          • target is a non-managed table
+            (EXTERNAL / FOREIGN / shared / view) → allowed, SKIPPED — PO never
+            runs on it (PO_SKIPPED_CODE).
+          • target securable does not exist yet → allowed, SKIPPED — nothing to
+            optimize on a table that isn't there (PO_SKIPPED_CODE).
+          • status unreadable (permission/transport) or flag missing/unknown
+                                                → allowed, continue (PO_UNKNOWN_CODE),
+            logged as a warning. Does NOT fail the run (per operational
+            requirement: an unconfirmable PO status must not block migration).
+        """
         fqn = f"{target_catalog}.{target_schema}.{target_table}"
         try:
-            eff, scope = self._resolve_effective_flag(target_catalog, target_schema, target_table)
-        except Exception as e:  # fail closed — cannot confirm disabled
+            obj, scope = self._resolve_securable(target_catalog, target_schema, target_table)
+        except _NotFoundError:
             return POState(
-                fqn=fqn, blocked=True, value=None, level=None, source_name=None,
-                reason=f"Could not read predictive optimization status on target: {str(e)[:300]}",
+                fqn=fqn, blocked=False, value=None, level=None, source_name=None,
+                reason="Target securable does not exist yet; PO not applicable — skipped.",
+                error_code=PO_SKIPPED_CODE,
+            )
+        except Exception as e:
+            # Unknown (permission/transport). Policy: do NOT fail — continue.
+            log.warning("PO status UNKNOWN for target %s (%s) — continuing without blocking.",
+                        fqn, str(e)[:200])
+            return POState(
+                fqn=fqn, blocked=False, value=None, level=None, source_name=None,
+                reason=f"PO status unknown ({str(e)[:200]}) — continuing without blocking.",
                 error_code=PO_UNKNOWN_CODE,
             )
 
+        # PO only ever runs on MANAGED Delta tables. If the resolved object is a
+        # table that is NOT managed (external / foreign / shared / view), the gate
+        # does not apply — skip it.
+        if scope == "table":
+            ttype = (obj.get("table_type") or "").upper()
+            if ttype and ttype != "MANAGED":
+                return POState(
+                    fqn=fqn, blocked=False, value=None, level=None, source_name=None,
+                    reason=f"Target is a {ttype} table; predictive optimization not "
+                           f"applicable — skipped.",
+                    error_code=PO_SKIPPED_CODE,
+                )
+
+        eff = obj.get("effective_predictive_optimization_flag") or {}
         value = eff.get("value")
 
         if value == "ENABLE":
@@ -153,11 +196,13 @@ class PredictiveOptimizationChecker:
                 reason="Predictive optimization disabled.", error_code="",
             )
 
-        # Unrecognised / missing effective flag → fail closed.
+        # Missing / unrecognised effective flag → UNKNOWN. Policy: continue.
+        log.warning("PO effective flag missing/unrecognised for target %s (%r) — "
+                    "continuing without blocking.", fqn, eff)
         return POState(
-            fqn=fqn, blocked=True, value=value, level=None, source_name=None,
-            reason=f"Could not confirm predictive optimization is disabled on target "
-                   f"(effective flag: {eff!r}).",
+            fqn=fqn, blocked=False, value=value, level=None, source_name=None,
+            reason=f"PO status could not be confirmed (effective flag: {eff!r}) — "
+                   f"continuing without blocking.",
             error_code=PO_UNKNOWN_CODE,
         )
 

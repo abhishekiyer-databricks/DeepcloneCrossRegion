@@ -1,0 +1,2 @@
+source_catalog,source_schema,source_table,target_catalog,target_schema,target_table
+po_e2e_cat_a,sa_on,t_sch1,po_e2e_tgt,sa_ok,t_a1

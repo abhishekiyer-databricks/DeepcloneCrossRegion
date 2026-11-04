@@ -7,8 +7,10 @@ Covers:
      - ENABLE set directly on the table           → blocked, level TABLE
      - ENABLE inherited from SCHEMA / CATALOG      → blocked, correct level/source
      - DISABLE                                     → allowed
-     - missing/unrecognised effective flag         → blocked (fail closed, UNKNOWN)
-     - API/permission error                        → blocked (fail closed, UNKNOWN)
+     - EXTERNAL / FOREIGN / shared target          → skipped (PO N/A)
+     - target securable absent                     → skipped (PO N/A)
+     - missing/unrecognised effective flag         → allowed, continue (UNKNOWN)
+     - API/permission error                        → allowed, continue (UNKNOWN)
   2. check_selections() runs in parallel and returns a per-fqn verdict map.
   3. InventoryManager integration: a PO-enabled source is recorded as PO_BLOCKED
      (not QUEUED), clean tables are still onboarded as QUEUED, and the stats
@@ -61,7 +63,7 @@ from orchestrator.workload_classifier import WorkloadClassifier        # noqa: E
 from orchestrator.inventory_manager import InventoryManager            # noqa: E402
 from orchestrator.predictive_optimization import (                     # noqa: E402
     PredictiveOptimizationChecker, check_selections,
-    PO_ENABLED_CODE, PO_UNKNOWN_CODE,
+    PO_ENABLED_CODE, PO_UNKNOWN_CODE, PO_SKIPPED_CODE,
 )
 
 
@@ -167,18 +169,49 @@ def test_disabled_is_allowed():
     assert st.error_code == ""
 
 
-def test_missing_flag_fails_closed():
-    api = FakeApi({"src_cat.src_sch.t1": {}})  # no effective flag at all
+def test_missing_flag_now_continues():
+    # Object exists but exposes no effective flag → UNKNOWN → do NOT block (continue).
+    api = FakeApi({"src_cat.src_sch.t1": {}})
     st = PredictiveOptimizationChecker(api).check("src_cat", "src_sch", "t1")
-    assert st.blocked is True
+    assert st.blocked is False
     assert st.error_code == PO_UNKNOWN_CODE
 
 
-def test_api_error_fails_closed():
+def test_api_error_now_continues():
+    # Permission/transport error reading PO → UNKNOWN → do NOT block (continue).
     api = FakeApi(errors={"src_cat.src_sch.t1"})
     st = PredictiveOptimizationChecker(api).check("src_cat", "src_sch", "t1")
-    assert st.blocked is True
+    assert st.blocked is False
     assert st.error_code == PO_UNKNOWN_CODE
+
+
+def test_external_target_is_skipped():
+    # Non-managed (EXTERNAL / FOREIGN / delta-shared) target → PO N/A → skipped,
+    # never blocked, even if a stray flag is present.
+    api = FakeApi({"tgt_cat.tgt_sch.t1": {
+        "table_type": "EXTERNAL",
+        "effective_predictive_optimization_flag": {"value": "ENABLE"},
+    }})
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is False
+    assert st.error_code == PO_SKIPPED_CODE
+
+
+def test_foreign_shared_target_is_skipped():
+    api = FakeApi({"tgt_cat.tgt_sch.t1": {"table_type": "FOREIGN"}})
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is False
+    assert st.error_code == PO_SKIPPED_CODE
+
+
+def test_managed_target_enabled_still_blocks():
+    api = FakeApi({"tgt_cat.tgt_sch.t1": {
+        "table_type": "MANAGED",
+        "effective_predictive_optimization_flag": {"value": "ENABLE"},
+    }})
+    st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
+    assert st.blocked is True
+    assert st.error_code == PO_ENABLED_CODE
 
 
 def test_target_table_missing_falls_back_to_schema():
@@ -207,12 +240,12 @@ def test_target_table_and_schema_missing_falls_back_to_catalog():
     assert api.calls == ["tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch", "tgt_cat"]
 
 
-def test_target_fully_missing_fails_closed():
-    # Nothing in the target securable tree exists → cannot confirm → blocked.
+def test_target_fully_missing_is_skipped():
+    # Nothing in the target securable tree exists yet → PO N/A → skipped, not blocked.
     api = FakeApi(not_found={"tgt_cat.tgt_sch.t1", "tgt_cat.tgt_sch", "tgt_cat"})
     st = PredictiveOptimizationChecker(api).check("tgt_cat", "tgt_sch", "t1")
-    assert st.blocked is True
-    assert st.error_code == PO_UNKNOWN_CODE
+    assert st.blocked is False
+    assert st.error_code == PO_SKIPPED_CODE
 
 
 # ── 2. Parallel check_selections ───────────────────────────────────────────────

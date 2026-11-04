@@ -691,12 +691,22 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             po_checker, selections, threads=cfg.inventory_parallel_threads
         )
         po_blocked = [(fqn, st) for fqn, st in po_map.items() if st.blocked]
+        # Visibility: tables where PO was skipped (external/absent) or unknown
+        # (unreadable) — these do NOT block; we continue, but surface them.
+        po_noted = [(fqn, st) for fqn, st in po_map.items()
+                    if not st.blocked and st.error_code]
+        if po_noted:
+            print(f"{'─'*68}")
+            print(f"  ⓘ PREDICTIVE OPTIMIZATION — {len(po_noted)} target(s) skipped/unknown (NOT blocked)")
+            for fqn, st in po_noted[:20]:
+                print(f"  SKIP/UNK  {fqn} → {st.fqn}  ({st.error_code}) — {st.reason}")
+            print(f"{'─'*68}\n")
         if po_blocked:
             print(f"{'─'*68}")
-            print(f"  ✗ PREDICTIVE OPTIMIZATION GATE — {len(po_blocked)} table(s) BLOCKED")
+            print(f"  ✗ PREDICTIVE OPTIMIZATION GATE — {len(po_blocked)} table(s) BLOCKED (PO ENABLED)")
             print(f"{'─'*68}")
             for fqn, st in po_blocked:
-                print(f"  BLOCK  {fqn}  — {st.reason}")
+                print(f"  BLOCK  {fqn} → {st.fqn}  — {st.reason}")
             print(f"{'─'*68}\n")
 
         # Show workload classification for each
@@ -711,13 +721,16 @@ if MODE in ("INVENTORY", "DRY_RUN"):
             print(f"  {cls:<8}: {cnt} table(s)")
         print(f"{'─'*68}\n")
 
-        # Fail the DRY_RUN loudly if any TARGET has Predictive Optimization on.
+        # Fail the DRY_RUN loudly ONLY if a TARGET has PO confirmed ENABLED.
+        # (External/shared/absent targets and unreadable/unknown status do NOT
+        # block — they are reported above and the migration continues.)
         if po_blocked:
             raise RuntimeError(
-                f"DRY_RUN blocked: Predictive Optimization is ENABLED (or "
-                f"unconfirmable) on {len(po_blocked)} target table(s). Disable PO "
-                f"at the target catalog/schema/table level before migrating. First few: "
-                + "; ".join(f"{fqn} ({st.error_code})" for fqn, st in po_blocked[:10])
+                f"DRY_RUN blocked: Predictive Optimization is ENABLED on "
+                f"{len(po_blocked)} target table(s). Disable PO at the target "
+                f"catalog/schema/table level before migrating. First few: "
+                + "; ".join(f"{src} -> {st.fqn} ({st.error_code})"
+                            for src, st in po_blocked[:10])
             )
 
     else:
@@ -757,12 +770,13 @@ if MODE in ("INVENTORY", "DRY_RUN"):
         if stats.get("po_blocked"):
             print(
                 f"  ✗ PREDICTIVE OPTIMIZATION GATE — {stats['po_blocked']} target "
-                f"table(s) have PO ENABLED (or unconfirmable) and were recorded as "
-                f"PO_BLOCKED (not queued). Disable PO on the target, then re-run "
-                f"INVENTORY with force_reonboard=true to queue them."
+                f"table(s) have PO ENABLED and were recorded as PO_BLOCKED (not "
+                f"queued). Disable PO on the target, then re-run INVENTORY with "
+                f"force_reonboard=true to queue them. (External/shared/absent targets "
+                f"and unreadable PO status do NOT block — they are onboarded normally.)"
             )
             for _sel, _po in stats["po_blocked_list"][:20]:
-                print(f"     BLOCK  {_sel.source_fqn}  — {_po.reason}")
+                print(f"     BLOCK  {_sel.source_fqn} → {_po.fqn}  — {_po.reason}")
 
         # Audit trail for the global exclusion list (DRY_RUN never writes to
         # migration_* tables — this only fires for real INVENTORY runs).
@@ -815,13 +829,12 @@ if MODE in ("INVENTORY", "DRY_RUN"):
         # the operator must disable PO on the target before the migration proceeds.
         if stats.get("po_blocked"):
             raise RuntimeError(
-                f"INVENTORY blocked: Predictive Optimization is ENABLED (or "
-                f"unconfirmable) on {stats['po_blocked']} target table(s), recorded "
-                f"as PO_BLOCKED in migration_control. Disable PO on the target "
-                f"catalog/schema/table, then re-run INVENTORY with "
-                f"force_reonboard=true. First few: "
+                f"INVENTORY blocked: Predictive Optimization is ENABLED on "
+                f"{stats['po_blocked']} target table(s), recorded as PO_BLOCKED in "
+                f"migration_control. Disable PO on the target catalog/schema/table, "
+                f"then re-run INVENTORY with force_reonboard=true. First few: "
                 + "; ".join(
-                    f"{sel.source_fqn} ({po.error_code})"
+                    f"{sel.source_fqn} -> {po.fqn} ({po.error_code})"
                     for sel, po in stats["po_blocked_list"][:10]
                 )
             )
